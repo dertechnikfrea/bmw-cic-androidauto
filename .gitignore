@@ -2,4 +2,6 @@ out/
 __pycache__/
 *.o
 *.stackdump
+AAHU.CRT
+AAHU.KEY
 certs/
