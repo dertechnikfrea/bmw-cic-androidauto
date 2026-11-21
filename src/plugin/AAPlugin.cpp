@@ -1,15 +1,15 @@
 /* AAPlugin: Android Auto for the BMW CIC HIGH (QNX 6.3.2, SH4, HmiMain 9283417A).
  *
- * One HMI page: [Conectar Android Auto] [Logs ON/OFF] + one status line.
+ * One HMI page: [Connect Android Auto] [Logs ON/OFF] + one status line.
  *
- *  Conectar -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
+ *  Connect  -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
  *           -> patched DM642 DSP image is linked in RAM (dspload on) once per boot.
  *           -> when the first phone video arrives: native HMI video route
  *              (audio C4, video source 8 -> sink 1, StartVideo, geometry, layer 26,
  *              menu layer alpha 0) and the cicaalive process feeds the DSP.
  *           -> our TerminalUI page (210) takes the iDrive: rotary/push/directions go
- *              to the phone. MENU or Volver leaves AA (it keeps running); pressing
- *              Conectar again brings it back. The AA "exit" icon also leaves.
+ *              to the phone. MENU or Back leaves AA (it keeps running); pressing
+ *              Connect again brings it back. The AA "exit" icon also leaves.
  *  Logs     -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
  *
@@ -251,7 +251,7 @@ static void key_sample(int focus, const KeyMap* map) {
 static bool onKeys(void*, const KeyMap& map) { key_sample(0, &map); return false; }
 static bool onFocus(void*, const KeyMap& map) { key_sample(1, &map); return false; }
 static bool onAaBack(void* obj, const bmw::Parcel&) {
-    if (g_live_disp) { g_live_user = 0; alog("Volver -> leave AA display"); }
+    if (g_live_disp) { g_live_user = 0; alog("Back -> leave AA display"); }
     static_cast<bmw::PluginApp*>(obj)->triggerEvent(EVENT_MAIN);
     return true;
 }
@@ -279,9 +279,9 @@ static int g_iba_layer = 0, g_iba_source_changed = 0, g_iba_previous_source = 0;
 static int g_iba_suspended = 0;
 static short g_iba_rect[2][4];
 static int g_iba_restore_sent = 0, g_iba_restore_failed = 0;
-static const char* const kIbaNames[] = {"comprobar", "pedir audio C4", "seleccionar fichero",
- "conectar video 8->1", "arrancar video", "mostrar capa", "parar video",
- "retirar video", "retirar audio", "esperando ACK", "video en marcha", "terminado", "fallo"};
+static const char* const kIbaNames[] = {"check", "request audio C4", "select file",
+ "connect video 8->1", "start video", "show layer", "stop video",
+ "disconnect video", "release audio", "waiting for ACK", "video running", "finished", "failed"};
 /* HmiMain LayerToolkit helper (enable layer 26), as the factory USB player uses it. */
 static const unsigned long kLayerHelper = 0x08add9d4UL;
 static void* iba_off(void* p, unsigned n) { return (char*)p + n; }
@@ -328,8 +328,8 @@ static int iba_check(bmw::PluginApp* app) {
     if (g_iba_checked) return g_iba.ready;
     if (g_iba_tid == -1) g_iba_tid = pthread_self();
     g_iba_checked = 1;
-    if (!iba_before("firmware check")) { iba_ui(app, "Hilo HMI distinto"); return 0; }
-    if (!iba_signatures()) { iba_ui(app, "HmiMain distinto: no compatible"); return 0; }
+    if (!iba_before("firmware check")) { iba_ui(app, "Wrong HMI thread"); return 0; }
+    if (!iba_signatures()) { iba_ui(app, "Different HmiMain: not compatible"); return 0; }
     typedef void* (*Factory)(unsigned);
     typedef void (*Ctor)(void*);
     ((Ctor)0x08201c58UL)(g_iba_target); g_iba_target_live = 1;
@@ -337,13 +337,13 @@ static int iba_check(bmw::PluginApp* app) {
     g_iba_aux = ((Factory)0x08b64d18UL)(38);
     g_iba_vcm = ((Factory)0x08ce0fc4UL)(1);
     g_iba_sink = ((Factory)0x08ce328cUL)(1);
-    if (!(g_iba_cm && g_iba_aux && g_iba_vcm && g_iba_sink)) { iba_ui(app, "Faltan servicios de video del CIC"); return 0; }
+    if (!(g_iba_cm && g_iba_aux && g_iba_vcm && g_iba_sink)) { iba_ui(app, "CIC video services missing"); return 0; }
     if (*(unsigned long*)iba_off(g_iba_cm, 0x6c8) != 0x0920cbbcUL ||
         *(unsigned long*)iba_off(g_iba_vcm, 0x6c8) != 0x092276c0UL ||
         *(unsigned long*)iba_off(g_iba_vcm, 0x760) != 0x0922767cUL ||
         *(unsigned long*)iba_off(g_iba_aux, 0x1de4) != kIbaSelectVtable ||
-        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != kIbaStartVtable) { iba_ui(app, "Layout de servicios distinto"); return 0; }
-#define IBA_LIST(p, o, f) if (!iba_list(p, o, (void*)&f)) { iba_ui(app, "No se pudo registrar listener"); return 0; }
+        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != kIbaStartVtable) { iba_ui(app, "Unexpected service layout"); return 0; }
+#define IBA_LIST(p, o, f) if (!iba_list(p, o, (void*)&f)) { iba_ui(app, "Could not register listener"); return 0; }
     IBA_LIST(g_iba_cm, 0x754, iba_audio_ack)
     IBA_LIST(g_iba_cm, 0x6f4, iba_audio_err)
     IBA_LIST(g_iba_cm, 0x7ec, iba_release_ack)
@@ -356,7 +356,7 @@ static int iba_check(bmw::PluginApp* app) {
         !iba_list(g_iba_sink, 0xc80, (void*)&iba_deck, 1) ||
         !iba_list(g_iba_sink, 0xb78, (void*)&iba_deck, 1) ||
         !iba_list(g_iba_sink, 0xbfc, (void*)&iba_deck, 1) ||
-        !iba_list(g_iba_vcm, 0x7f8, (void*)&iba_deck, 1)) { iba_ui(app, "Suscripcion de propiedades fallo"); return 0; }
+        !iba_list(g_iba_vcm, 0x7f8, (void*)&iba_deck, 1)) { iba_ui(app, "Property subscription failed"); return 0; }
     IBA_LIST(g_iba_vcm, 0x754, iba_conn_ack)
     IBA_LIST(g_iba_vcm, 0x6f4, iba_conn_err)
     IBA_LIST(g_iba_vcm, 0x7ec, iba_disconn_ack)
@@ -381,7 +381,7 @@ static int iba_idle_sink() {
     int rc = ((Get)0x08ce4890UL)(iba_off(g_iba_sink, 0xc80), &source);
     alog_val("current source", source);
     int own = g_iba.result[IBA_CONNECT] == 1;
-    if (!rc || (source != 0 && !(own && source == 8))) { iba_ui(g_app, "Pantalla de video ocupada por otra fuente"); return 0; }
+    if (!rc || (source != 0 && !(own && source == 8))) { iba_ui(g_app, "Video screen busy with another source"); return 0; }
     typedef int (*Valid)(void*);
     typedef int (*Table)(void*, int, int*);
     void* table = iba_off(g_iba_vcm, 0x7f8);
@@ -389,7 +389,7 @@ static int iba_idle_sink() {
     int connected = -1;
     if (!((Table)0x08ce160cUL)(table, 1, &connected) || connected != (own ? 8 : 0)) {
         /* car: connect ACK but table stays 0 until video starts; only that case continues */
-        if (!(own && connected == 0 && source == 0)) { iba_ui(g_app, "Tabla de video distinta"); return 0; }
+        if (!(own && connected == 0 && source == 0)) { iba_ui(g_app, "Unexpected video table"); return 0; }
     }
     if (!own) g_iba_previous_source = source;
     return 1;
@@ -446,16 +446,16 @@ static int iba_apply_geometry(bmw::PluginApp*) {
 static int iba_route_ours(bmw::PluginApp* app) {
     typedef int (*Valid)(void*); typedef int (*Get)(void*, int*); typedef int (*Table)(void*, int, int*);
     void* src = iba_off(g_iba_sink, 0xc80); void* table = iba_off(g_iba_vcm, 0x7f8);
-    if (!((Valid)0x08d1ae64UL)(src) || !((Valid)0x08d1ae64UL)(table)) { iba_ui(app, "Esperando ruta de video"); return 0; }
+    if (!((Valid)0x08d1ae64UL)(src) || !((Valid)0x08d1ae64UL)(table)) { iba_ui(app, "Waiting for video route"); return 0; }
     int current = -1, connection = -1;
     if (!((Get)0x08ce4890UL)(src, &current) || !((Table)0x08ce160cUL)(table, 1, &connection)) return 0;
     int own_table_lag = connection == 0 && g_iba.result[IBA_CONNECT] == 1;
-    if ((current != 0 && current != 8) || (connection != 8 && !own_table_lag)) { iba_ui(app, "Ruta de video cambiada por otro cliente"); return 0; }
+    if ((current != 0 && current != 8) || (connection != 8 && !own_table_lag)) { iba_ui(app, "Video route changed by another client"); return 0; }
     return 1;
 }
 static int iba_restore_sink(bmw::PluginApp* app) {
     if (!g_iba_source_changed) return 1;
-    if (g_iba_restore_failed) { iba_ui(app, "Fallo restaurando video; reinicia el CIC"); return 0; }
+    if (g_iba_restore_failed) { iba_ui(app, "Video restore failed; restart the CIC"); return 0; }
     typedef int (*SetSource)(void*, int, unsigned char);
     typedef int (*Rect)(void*, short, short, short, short);
     if (!g_iba_restore_sent) {
@@ -487,7 +487,7 @@ static int live_spawn() {
 static int live_prepare(bmw::PluginApp* app) {
     if (!g_dsp_attempted) {
         g_dsp_attempted = 1;
-        if (!live_spawn()) { g_iba.failed = 1; iba_ui(app, "No se pudo arrancar cicaalive"); return 0; }
+        if (!live_spawn()) { g_iba.failed = 1; iba_ui(app, "Could not start cicaalive"); return 0; }
         return 0;   /* next tick shows the layer */
     }
     if (!g_dsp_pid) return 0;
@@ -495,7 +495,7 @@ static int live_prepare(bmw::PluginApp* app) {
     int error = r < 0 ? errno : 0;
     if (r == 0) return 1;
     if (r < 0 && error != ECHILD) { if (error != EINTR) g_iba.failed = 1; return 0; }
-    g_dsp_pid = 0; g_iba.failed = 1; iba_ui(app, "cicaalive termino antes de mostrar video"); return 0;
+    g_dsp_pid = 0; g_iba.failed = 1; iba_ui(app, "cicaalive ended before showing video"); return 0;
 }
 static int live_reap() {
     if (!g_dsp_pid) return 1;
@@ -569,21 +569,21 @@ static void menu_restore() {
 }
 /* One step of the native flow (HMI thread only). */
 static void iba_do(bmw::PluginApp* app, int stopping) {
-    if (pthread_self() != g_iba_tid) { iba_ui(app, "Accion fuera del hilo HMI"); return; }
+    if (pthread_self() != g_iba_tid) { iba_ui(app, "Action outside the HMI thread"); return; }
     if (!g_iba.ready) { if (!stopping) iba_check(app); return; }
-    if (g_iba_suspended) { iba_ui(app, "Callback fuera del hilo HMI"); return; }
+    if (g_iba_suspended) { iba_ui(app, "Callback outside the HMI thread"); return; }
     g_iba.expire(mono_ms());
     if (stopping) g_iba.stopping = 1;
     IbaOp op = g_iba.next();
     if (g_iba.stopping && (op == IBA_DISCONNECT || op == IBA_RELEASE || op == IBA_DONE) && !iba_restore_sink(app)) return;
     if (op >= IBA_WAIT) return;
     if (op == IBA_AUDIO) {
-        if (!file_exists(AAP_LIVE)) { iba_ui(app, "Falta cicaalive (reinstalar)"); return; }
+        if (!file_exists(AAP_LIVE)) { iba_ui(app, "cicaalive missing (reinstall)"); return; }
         if (!iba_idle_sink()) return;
         if (!iba_snapshot_rect()) return;
     }
     if (op == IBA_SHOW) {
-        if (*(unsigned long*)0x091fda28UL != 0) { g_iba.failed = 1; iba_ui(app, "Capa de video ocupada por otro cliente"); return; }
+        if (*(unsigned long*)0x091fda28UL != 0) { g_iba.failed = 1; iba_ui(app, "Video layer busy with another client"); return; }
         if (!iba_route_ours(app)) return;
         if (!live_prepare(app)) return;
         if (!iba_apply_geometry(app)) return;
@@ -672,7 +672,7 @@ static void iba_cb(void* epoch, int, void* runnable) {
     if ((unsigned long)epoch != g_iba_epoch || auto_is_shutdown()) { g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx); return; }
     pthread_mutex_unlock(g_iba_queue_mtx);
     int pu_ok = pthread_self() == g_hmi_tid && runnable == (void*)g_iba_run && ((IbaCurrentPU)0x08d5c528UL)() == g_iba_pu;
-    if (!pu_ok) { g_iba_msg = "Hilo HMI no verificado"; auto_fail_control("Hilo del CIC no verificado."); }
+    if (!pu_ok) { g_iba_msg = "HMI thread not verified"; auto_fail_control("CIC thread not verified."); }
     else { g_iba_tid = pthread_self(); auto_tick(g_app); }
     pthread_mutex_lock(g_iba_queue_mtx); g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx);
 }
@@ -727,16 +727,16 @@ struct NativeBackend {
     bool held() { return g_dsp_pid || g_iba_layer || g_iba_source_changed || g_iba.owns_resources() || g_iba.pending(); }
     bool busy() { return held() || g_iba_restore_failed || g_iba_suspended; }
     bool unlimited() { return true; }
-    bool preflight(int) { if (!file_exists(AAP_LIVE)) { message("Falta cicaalive instalado."); return false; } return true; }
+    bool preflight(int) { if (!file_exists(AAP_LIVE)) { message("cicaalive not installed."); return false; } return true; }
     void select(int) {}
     void prepare() { iba_check(app); }
     bool restart() { iba_restart(); return g_iba.untouched() != 0; }
     void step(int stopping, long) { iba_do(app, stopping); }
-    const char* last_message() { return g_iba_msg[0] ? g_iba_msg : "No se pudo completar la operacion."; }
+    const char* last_message() { return g_iba_msg[0] ? g_iba_msg : "Could not complete the operation."; }
     void message(const char* s) {
         /* AA video on screen -> open our TerminalUI page (iDrive keys come to us). */
-        if (str_eq(s, "Reproductor iniciado.")) { g_live_disp = 1; g_live_disp_ms = mono_ms(); alog("display ON"); app->triggerEvent(EVENT_OPEN_AA); }
-        else if (g_live_disp && (str_eq(s, "Detenido.") || str_eq(s, "Error; recursos liberados.") || str_eq(s, "Deteniendo y liberando recursos..."))) {
+        if (str_eq(s, "Player started.")) { g_live_disp = 1; g_live_disp_ms = mono_ms(); alog("display ON"); app->triggerEvent(EVENT_OPEN_AA); }
+        else if (g_live_disp && (str_eq(s, "Stopped.") || str_eq(s, "Error; resources released.") || str_eq(s, "Stopping and releasing resources..."))) {
             g_live_disp = 0; alog("display OFF");
             if (g_live_user) app->triggerEvent(EVENT_MAIN);
         }
@@ -756,7 +756,7 @@ static void auto_tick(bmw::PluginApp* app) {
     int command = g_auto_command; g_auto_command = 0; int abort = g_auto_abort;
     pthread_mutex_unlock(g_auto_mtx);
     NativeBackend b(app); long now = mono_ms();
-    if (abort) { g_auto_player.phase = AUTO_BLOCKED; auto_publish("El CIC no responde; reinicia el CIC."); }
+    if (abort) { g_auto_player.phase = AUTO_BLOCKED; auto_publish("CIC not responding; restart the CIC."); }
     else {
         if (command == 1) g_auto_player.begin(b, 0, now);
         else if (command == 4) g_auto_player.stop(b, now);
@@ -777,11 +777,11 @@ static void* auto_worker(void*) {
             if (!waiting) waiting = mono_ms();
             if ((unsigned long)(mono_ms() - waiting) > 15000UL) {
                 pthread_mutex_lock(g_auto_mtx); g_auto_abort = 1; g_auto_need_tick = 0; g_auto_command = 0; pthread_mutex_unlock(g_auto_mtx);
-                auto_publish("El CIC no responde."); finish = 1;
+                auto_publish("CIC not responding."); finish = 1;
             }
         } else if (!finish) {
             waiting = 0;
-            if (!iba_queue()) { if (++queue_failed >= 4) { auto_publish("No se puede comunicar con el CIC."); finish = 1; } }
+            if (!iba_queue()) { if (++queue_failed >= 4) { auto_publish("Cannot communicate with the CIC."); finish = 1; } }
             else queue_failed = 0;
         }
         if (finish) {
@@ -833,7 +833,7 @@ static int dsp_patch_ensure() {
     int st = -1;
     if (pid > 0) { for (int i = 0; i < 40 && waitpid(pid, &st, WNOHANG) != pid; ++i) { struct timespec t = {0, 50000000}; nanosleep(&t, 0); } }
     if (pid > 0 && st == 0) { alog("DSP patch already linked"); return 1; }
-    if (!file_exists(AAP_DSP_IMG)) { alog("DSP image missing (reinstalar)"); return 0; }
+    if (!file_exists(AAP_DSP_IMG)) { alog("DSP image missing (reinstall)"); return 0; }
     pid = spawnl(P_NOWAIT, AAP_DSPLOAD, AAP_DSPLOAD, "on", AAP_DSP_IMG, (char*)0);
     if (pid <= 0) { alog("DSP patch: spawn failed"); return 0; }
     st = -1;
@@ -865,7 +865,7 @@ static void status_show(bmw::PluginApp* app, const char* aa) {
     char line[200], v[160];
     pthread_mutex_lock(g_auto_mtx); copy_str(v, g_auto_text, sizeof v); pthread_mutex_unlock(g_auto_mtx);
     unsigned n = put_str(line, 0, aa ? aa : "");
-    if (v[0] && !str_eq(v, "Reproductor iniciado.")) { n = put_str(line, n, " | "); n = put_str(line, n, v); }
+    if (v[0] && !str_eq(v, "Player started.")) { n = put_str(line, n, " | "); n = put_str(line, n, v); }
     line[n] = 0;
     ui(app, MODEL_STATUS, line);
 }
@@ -875,7 +875,7 @@ static void* aa_poll_thread(void*) {
     int live_req = 0;
     g_ring_base = 0xffffffffu; g_live_user = 1; keymap_load();
     alog("=== AA session ===");
-    if (!dsp_patch_ensure()) { ui(app, MODEL_STATUS, "No se pudo cargar el DSP parcheado (reinstalar)"); }
+    if (!dsp_patch_ensure()) { ui(app, MODEL_STATUS, "Could not load the patched DSP (reinstall)"); }
     while (app) {
         sleep(1);
         status_show(app, snap(g_aa_status(), st, sizeof st));
@@ -900,17 +900,17 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
-        ui(app, MODEL_STATUS, "Volviendo a Android Auto...");
+        ui(app, MODEL_STATUS, "Returning to Android Auto...");
         return true;
     }
     if (auto_busy_control() || g_iba.owns_resources() || g_iba_layer || g_iba_source_changed) {
-        ui(app, MODEL_STATUS, "Cerrando video anterior, espera unos segundos");
+        ui(app, MODEL_STATUS, "Closing previous video, wait a few seconds");
         return true;
     }
     if (!g_aa_start) {
-        if (!file_exists(AAP_LIB)) { ui(app, MODEL_STATUS, "Falta libcicaa.so (instalar)"); return true; }
+        if (!file_exists(AAP_LIB)) { ui(app, MODEL_STATUS, "libcicaa.so missing (install)"); return true; }
         void* h = dlopen(AAP_LIB, 2 /* RTLD_NOW */);
-        if (!h) { ui(app, MODEL_STATUS, "No se pudo cargar libcicaa.so"); return true; }
+        if (!h) { ui(app, MODEL_STATUS, "Could not load libcicaa.so"); return true; }
         g_aa_start = (fn_int)dlsym(h, "cicaa_start");
         g_aa_busy = (fn_int)dlsym(h, "cicaa_busy");
         g_aa_status = (fn_str)dlsym(h, "cicaa_status");
@@ -922,10 +922,10 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     }
     if (g_logs) mkdir(AAP_LOGDIR, 0755);
     int rc = g_aa_start();
-    if (rc != 0) { ui(app, MODEL_STATUS, rc == 1 ? "Ya en marcha" : "Error arrancando AA"); return true; }
+    if (rc != 0) { ui(app, MODEL_STATUS, rc == 1 ? "Already running" : "Error starting AA"); return true; }
     g_aa_polling = 1;
-    if (spawn(&aa_poll_thread) != 0) { g_aa_polling = 0; ui(app, MODEL_STATUS, "Error creando hilo"); return true; }
-    ui(app, MODEL_STATUS, "Conecta el movil por USB...");
+    if (spawn(&aa_poll_thread) != 0) { g_aa_polling = 0; ui(app, MODEL_STATUS, "Error creating thread"); return true; }
+    ui(app, MODEL_STATUS, "Connect the phone via USB...");
     return true;
 }
 static void logs_show(bmw::PluginApp* app) { ui(app, MODEL_LOGS, g_logs ? "ON (" AAP_LOGDIR ")" : "OFF"); }

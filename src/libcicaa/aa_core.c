@@ -395,7 +395,7 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             hexline(a, "AA SD request", b, n);
             if (send_sd_response(a)) return 1;
             if (*stage < 4) *stage = 4;
-            snprintf(summary, sn, "SD respondido; esperando canales");
+            snprintf(summary, sn, "SD answered; waiting for channels");
             return 0;
         case M_PING_REQ:
             pb_u(&r, 1, 0);   /* timestamp */
@@ -455,9 +455,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             hexline(a, "AA video start", b, n);
             /* field 1 = session id */
             if (n >= 2 && b[0] == 0x08) a->vsession = b[1] & 0x7f;
-            if (av_open(a->lg, 800, 480)) { snprintf(summary,sn,"V13 adaptador no disponible"); return 1; }
+            if (av_open(a->lg, 800, 480)) { snprintf(summary,sn,"V13 adapter not available"); return 1; }
             if (*stage < 6) *stage = 6;
-            snprintf(summary, sn, "VIDEO START sesion %d", a->vsession);
+            snprintf(summary, sn, "VIDEO START session %d", a->vsession);
             return 0;
         }
         if (id == AV_STOP) { av_close(); a->lg("AA video stop + V13 adapter closed"); return 0; }
@@ -474,9 +474,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             return 0;
         }
         if (id == AV_MEDIA || id == AV_MEDIA_TS) {
-            if (on_video(a, id, b, n)) { snprintf(summary,sn,"V13 error adaptador video (ver log)"); return 1; }
+            if (on_video(a, id, b, n)) { snprintf(summary,sn,"V13 video adapter error (see log)"); return 1; }
             if (*stage < 7) *stage = 7;
-            snprintf(summary, sn, "VIDEO H.264 recibido: %lu tramas, %lu bytes", a->vframes, a->vbytes);
+            snprintf(summary, sn, "VIDEO H.264 received: %lu frames, %lu bytes", a->vframes, a->vbytes);
             return 0;
         }
     }
@@ -504,7 +504,7 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
     mbedtls_entropy_init(&ent); mbedtls_ctr_drbg_init(&rng);
     mbedtls_x509_crt_init(&crt); mbedtls_pk_init(&key);
     mbedtls_ssl_config_init(&cfg); mbedtls_ssl_init(&ssl);
-    snprintf(summary, sn, "sin respuesta del movil");
+    snprintf(summary, sn, "no response from phone");
 
     /* 1. version */
     st("AA: VERSION_REQUEST");
@@ -554,13 +554,13 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
         if (rc == 0) break;
         if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
             mbedtls_strerror(rc, e, sizeof e);
-            lg("AA TLS FAIL -0x%04x %s (alerta del movil = cert HU no aceptado?)", -rc, e);
-            snprintf(summary, sn, "version OK, TLS fallo -0x%04x", -rc);
+            lg("AA TLS FAIL -0x%04x %s (phone alert = HU certificate rejected?)", -rc, e);
+            snprintf(summary, sn, "version OK, TLS failed -0x%04x", -rc);
             goto out;
         }
         if (rc == MBEDTLS_ERR_SSL_WANT_READ) {
             int r = read_msg(a, 8000);
-            if (r != 1) { lg("AA TLS waiting phone rc=%d", r); snprintf(summary, sn, "version OK, TLS sin respuesta"); goto out; }
+            if (r != 1) { lg("AA TLS waiting phone rc=%d", r); snprintf(summary, sn, "version OK, TLS no response"); goto out; }
             if (a->msgn >= 2 && ((a->msg[0] << 8) | a->msg[1]) == M_SSL) {
                 lg("AA rx SSL_HANDSHAKE %u bytes", (unsigned)(a->msgn - 2));
                 tin_push(a, a->msg + 2, a->msgn - 2);
@@ -592,13 +592,13 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
 #endif
     if (a->cfd >= 0 && write(a->cfd, "CICCAP01", 8) == 8) a->cbytes = 8;
     else if (a->cfd >= 0) { close(a->cfd); a->cfd = -1; }
-    st("AA: sesion activa");
+    st("AA: session active");
 
     /* 4.. main loop: up to 10 min or 60 s of silence */
     g_proj = 1; g_proj_req = 0;
     for (i = 0; idle < 600; ++i) {
         int r;
-        if (av_failed()) { snprintf(summary,sn,"V13 fallo backend video (ver log)"); break; }
+        if (av_failed()) { snprintf(summary,sn,"V13 video backend failure (see log)"); break; }
         input_drain(a);
         r = read_msg(a, 100);
         if (r == 0) { ++idle; continue; }
@@ -607,7 +607,7 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
         if (dispatch(a, &stage, summary, sn)) break;
         if (stage >= 7 && a->vframes % 60 == 0) {
             char m[96];
-            snprintf(m, sizeof m, "AA: video %lu tramas %lu KB", a->vframes, a->vbytes / 1024);
+            snprintf(m, sizeof m, "AA: video %lu frames %lu KB", a->vframes, a->vbytes / 1024);
             st(m);
         }
     }

@@ -134,7 +134,7 @@ static int aoa_switch(usbd_device_instance_t *in)
         if (rc < 0) LG("AOA SEND_STRING %d failed %d", i, rc);
     }
     rc = ctl(dev, p, 0, 53, 0, 0, 0, 0);
-    LG("AOA START rc=%d (el movil debe reconectarse como 18d1:2d00)", rc);
+    LG("AOA START rc=%d (phone must re-enumerate as 18d1:2d00)", rc);
     usbd_close_pipe(p);
     usbd_detach(dev);
     return proto;
@@ -268,7 +268,7 @@ int aa_usb_open(aa_log_fn lg, aa_status_fn st, int wait_s, aa_transport_t *t)
     for (s = 0; s < wait_s; ++s) {
         if (find_inst(1, &in)) {
             lg("USB accessory present vid=%04x pid=%04x", (unsigned)in.ident.vendor, (unsigned)in.ident.device);
-            st("AA: accesorio AOA detectado");
+            st("AA: AOA accessory detected");
             sleep(1);
             if (open_accessory(&in) == 0) {
                 t->ctx = 0; t->send = t_send; t->recv = t_recv;
@@ -277,14 +277,14 @@ int aa_usb_open(aa_log_fn lg, aa_status_fn st, int wait_s, aa_transport_t *t)
             return -3;
         }
         if (!switched && find_inst(0, &in)) {
-            st("AA: movil detectado, cambiando a AOA");
+            st("AA: phone detected, switching to AOA");
             rc = aoa_switch(&in);
             if (rc > 0) switched = 1;
             else if (rc == -2) { lg("USB device is not AOA capable (vid=%04x)", (unsigned)in.ident.vendor); }
         }
         if (s % 10 == 0) {
             char m[64];
-            snprintf(m, sizeof m, "AA: conecta el movil (%d s)", wait_s - s);
+            snprintf(m, sizeof m, "AA: connect the phone (%d s)", wait_s - s);
             st(m);
         }
         sleep(1);
