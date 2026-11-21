@@ -247,11 +247,16 @@ static int send_sd_response(aa_t *a)
     memset(&item, 0, sizeof item); pb_u(&item, 1, 13); pb_msg(&sub, 1, &item);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 10); pb_msg(&sub, 1, &item);
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
-    /* channel 3: video H.264 800x480, 30 fps (v19), dpi 140 */
+    /* channel 3: video H.264 800x480 (UI area 720x360, see aap_paths.h), 30 fps (v19), dpi 140 */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
     /* v19: field 2 frame_rate 2 = 30 fps (1 = 60 fps, what v13-v18 requested). */
     /* v47: margin_width (default 80, file margin_w.txt overrides): DSP shows only 720 px. */
     pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, AAP_MARGIN_W); pb_u(&cfg, 4, AAP_MARGIN_H); pb_u(&cfg, 5, 140);
+    /* VideoConfiguration field 11 ui_config { 1 margins { 2 bottom, 4 right } }: AA puts
+       its UI area (720x360) in the top-left corner instead of centring it. */
+    {   pb_t ins, ui; memset(&ins, 0, sizeof ins); memset(&ui, 0, sizeof ui);
+        pb_u(&ins, 2, AAP_UI_MARGIN_BOTTOM); pb_u(&ins, 4, AAP_UI_MARGIN_RIGHT);
+        pb_msg(&ui, 1, &ins); pb_msg(&cfg, 11, &ui); }
     pb_u(&sub, 1, 3 /* VIDEO */); pb_msg(&sub, 4, &cfg); pb_u(&sub, 5, 1);
     pb_u(&ch, 1, CH_VIDEO); pb_msg(&ch, 3, &sub); pb_msg(&sd, 1, &ch);
     /* channel 1: input - rotary/DPAD keycodes, touch 800x480 */

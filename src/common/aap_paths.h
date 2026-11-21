@@ -15,14 +15,24 @@
 #define AAP_STOP      "/dev/shmem/aap.stop"         /* RAM: asks cicaalive to stop */
 #define AAP_SEED      "/dev/shmem/aap.seed"         /* RAM: entropy chaining (CIC has no /dev/random) */
 /* Optional read-only overrides (never created by the plugin): */
-#define AAP_GEOM_TXT  AAP_DIR "/geom.txt"           /* "sx sy sw sh dx dy dw dh" */
 #define AAP_KEYMAP    AAP_DIR "/keymap.txt"         /* lines "cic_key android_key" */
 #define AAP_VLEAD_TXT AAP_DIR "/vlead_ms.txt"       /* video lead in ms */
-/* Video layout requested from the phone: 800x480 stream with these margins
- * (AA draws its UI in the remaining 640x320 area), shown 960x480 centred. */
-#define AAP_MARGIN_W  160
-#define AAP_MARGIN_H  160
-#define AAP_GEOM      {80, 80, 640, 320, 160, 0, 960, 480}
+/* Video layout requested from the phone: 800x480 stream, AA draws its UI in a 720x360
+ * area. width/height margin shrink the UI area, ui_config.margins (bottom/right) place
+ * it in the top-left corner, so the plugin crops exactly (0,0,720,360).
+ * Why 720 wide: the DM642 DVD decoder outputs at most 720 columns; with 800 columns the
+ * right 80 were cut off (and full 800-px decoding needs more DSP patches, tested: heavy
+ * white/black line noise). 720x360 + the AA status bar at the side looked best in the
+ * car (sharp, no letterbox); 640x320/640x400 variants were less sharp.
+ * The source rectangle is scaled 4:3 horizontally to 960x480 so the picture is not
+ * distorted on the 1280x480 (wide pixel) CIC display. */
+#define AAP_MARGIN_W  80
+#define AAP_MARGIN_H  120
+#define AAP_UI_MARGIN_BOTTOM 120
+#define AAP_UI_MARGIN_RIGHT  80
+/* sx sy sw sh (crop in the 800x480 stream), dx dy dw dh (on the 1280x480 display).
+ * x = 256 leaves the CIC's left arc/menu column visible and centres the picture. */
+#define AAP_GEOM      {0, 0, 720, 360, 256, 0, 960, 480}
 /* Video lead: PTS = arrival + lead. Car tests: 50 ms gives clearly the most direct
  * response; 150/300 ms only add latency (the DSP shows frames in its own clock anyway).
  * vlead_ms.txt can still raise it. */

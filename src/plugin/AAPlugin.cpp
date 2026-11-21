@@ -407,21 +407,11 @@ static int iba_snapshot_rect() {
 }
 static int g_dsp_pid = 0;
 static int g_dsp_attempted = 0;
+/* Built-in geometry (geom.txt is gone: the layout must match what libcicaa asks the
+ * phone for, so a free text file only caused broken pictures). */
 static void geom_load(short* g) {
     static const short def[8] = AAP_GEOM;
     for (int i = 0; i < 8; ++i) g[i] = def[i];
-    int f = open(AAP_GEOM_TXT, 0);
-    if (f < 0) return;
-    char b[80]; int n = read(f, b, sizeof b - 1); close(f);
-    if (n <= 0) return;
-    b[n] = 0; int k = 0, v = 0, neg = 0, in = 0; short t[8];
-    for (int i = 0; i <= n && k < 8; ++i) {
-        char c = b[i];
-        if (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); in = 1; }
-        else if (c == '-' && !in) neg = 1;
-        else if (in) { t[k++] = (short)(neg ? -v : v); v = 0; neg = 0; in = 0; }
-    }
-    if (k == 8) for (int i = 0; i < 8; ++i) g[i] = t[i];
 }
 static int iba_apply_geometry(bmw::PluginApp*) {
     /* The BMW DVD service never publishes norm/format here (we feed the DSP ourselves):
@@ -567,6 +557,36 @@ static void menu_restore() {
     if (f && g_menu_hold_on) { int cids[1] = {256}; f(cids, 1, 0); }
     g_menu_reasserts = 0; g_menu_last = 0; g_menu_hold_on = 0;
 }
+/* Geometry hold + fade-in (HMI thread, every auto_tick ~250 ms while the layer is on).
+ * Car finding: right after StartVideo the DVD service sets the sink rectangles back to
+ * its own PAL window, sometimes several times during the first second ("full screen for
+ * a moment, then the small PAL window"). So the rectangles are compared with what we saw
+ * last time and our geometry is applied again whenever someone changed them. The layer
+ * is made visible after 4 ticks without a correction, at the latest after 12 ticks. */
+static short g_geo_seen[2][4];
+static int g_geo_stable = 0, g_geo_ticks = 0, g_geo_visible = 0;
+static void geo_read(short r[2][4]) {
+    for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j)
+        r[i][j] = ((short*)iba_off(g_iba_sink, (i ? 0xbfc : 0xb78) + 124))[j];
+}
+static void geometry_hold(bmw::PluginApp* app) {
+    if (!g_iba_layer || !g_iba_sink || !g_iba_mgr) {
+        for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j) g_geo_seen[i][j] = 0;
+        g_geo_stable = g_geo_ticks = g_geo_visible = 0;
+        return;
+    }
+    short cur[2][4]; geo_read(cur);
+    int changed = 0;
+    for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j) if (cur[i][j] != g_geo_seen[i][j]) changed = 1;
+    if (changed) { g_geo_stable = 0; iba_apply_geometry(app); geo_read(g_geo_seen); }
+    ++g_geo_ticks; ++g_geo_stable;
+    if (!g_geo_visible && (g_geo_stable >= 4 || g_geo_ticks >= 12)) {
+        unsigned long* vt = *(unsigned long**)g_iba_mgr;
+        typedef void (*SetAlpha)(void*, unsigned, unsigned);
+        ((SetAlpha)vt[14])(g_iba_mgr, 26, 255);
+        g_geo_visible = 1; alog("video layer visible");
+    }
+}
 /* One step of the native flow (HMI thread only). */
 static void iba_do(bmw::PluginApp* app, int stopping) {
     if (pthread_self() != g_iba_tid) { iba_ui(app, "Action outside the HMI thread"); return; }
@@ -600,7 +620,9 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
         if (!((GetAlpha)vt[15])(g_iba_mgr, 26, &g_iba_alpha)) { g_iba.failed = 1; return; }
         g_iba.issue(op, 0, mono_ms());
         typedef void (*SetAlpha)(void*, unsigned, unsigned);
-        ((SetAlpha)vt[14])(g_iba_mgr, 26, 255);
+        /* Layer 26 starts transparent; geometry_hold() makes it visible once the CIC has
+           stopped changing the rectangles (no flash of a wrong-sized picture). */
+        ((SetAlpha)vt[14])(g_iba_mgr, 26, 0);
         typedef void (*Enable)(int); ((Enable)kLayerHelper)(1); g_iba_layer = 1;
         g_iba.ack(op, 0, 1);
         menu_hide_for_video();
@@ -763,6 +785,7 @@ static void auto_tick(bmw::PluginApp* app) {
         g_auto_player.tick(b, now);
     }
     menu_hold(mono_ms());
+    geometry_hold(app);
     pthread_mutex_lock(g_auto_mtx);
     g_auto_need_tick = !g_auto_abort && g_auto_player.active();
     pthread_mutex_unlock(g_auto_mtx);
