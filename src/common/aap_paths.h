@@ -47,4 +47,5 @@
 #define CICAA_IN_KEY      1   /* code = Android keycode, value 1 down / 0 up */
 #define CICAA_IN_REL      2   /* rotary: code 65536, value = signed steps */
 #define CICAA_IN_BYEBYE   7   /* Disconnect button: end the AA session properly */
+#define CICAA_IN_LOCATION 9   /* code = latitude, value = longitude, CIC units (2^32 = 360 deg) */
 #endif

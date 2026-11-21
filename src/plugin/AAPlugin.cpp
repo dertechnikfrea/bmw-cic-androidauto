@@ -15,6 +15,8 @@
  *  Switch Audio -> BT Audio (default: phone music over Bluetooth, CIC source kept) or
  *              AA Audio (all AA audio over USB -> DSP); takes effect at the next Connect.
  *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
+ *  GPS      -> the CIC position (RHMI data model vehicle.location) goes to the phone
+ *              while AA runs (see onLocation()).
  *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
  *
@@ -952,9 +954,11 @@ static void* aa_poll_thread(void*) {
     g_aa_polling = 0;
     return 0;
 }
+static void location_activate(bmw::PluginApp* app);
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
     status_line(app);
+    location_activate(app);
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
@@ -1037,6 +1041,74 @@ static bool onLogs(void* obj, const bmw::Parcel&) {
     return true;
 }
 
+/* ======================= CIC position -> phone ======================= */
+/* AAPlugin.xml: <raDataRequestModel id="230" modelType="vehicle.location" />. The names
+ * are the RHMI ones of this HmiMain (CLocationProvider; others: vehicle.speed,
+ * vehicle.acceleration, vehicle.mileage_in_km, vehicle.tankrange, mmi.units, ...). The
+ * value arrives as a wide string "lat,lon" in CIC units (2^32 = 360 degrees), about once
+ * per second, also in an underground car park (dead reckoning), "0,0" right after a CIC
+ * start. Like the Today/PIM apps: handler registered at create, the update activated
+ * on Connect.
+ * The PluginApp/Parcel/BasicString<ushort> functions are looked up with dlsym, exactly
+ * as in the build tested in the car: if a firmware lacks one of them the plugin still
+ * loads and only the position forwarding is off. */
+enum { DATA_LOCATION = 230 };
+typedef void (*AddDataUpdateHandler)(bmw::PluginApp*, unsigned, const Handler&);
+typedef void (*ActivateDataUpdate)(bmw::PluginApp*, unsigned, bool);
+typedef bool (*ReadWString)(const bmw::Parcel*, void*);
+typedef void (*WStringFn)(void*);
+typedef const unsigned short* (*WStringCStr)(const void*);
+static struct { ActivateDataUpdate activate; ReadWString read; WStringFn ctor, dtor; WStringCStr c_str; int ok; } g_vd;
+static unsigned g_gps_n = 0;
+static long g_gps_log_ms = 0;
+static int parse_int(const char** p, int* v) {
+    const char* s = *p; int neg = 0, any = 0; unsigned u = 0;
+    if (*s == '-') { neg = 1; ++s; }
+    while (*s >= '0' && *s <= '9') { u = u * 10 + (unsigned)(*s++ - '0'); any = 1; }
+    *v = neg ? -(int)u : (int)u; *p = s; return any;
+}
+static bool onLocation(void*, const bmw::Parcel& parcel) {
+    unsigned ws[4] = {0, 0, 0, 0};          /* bmw::BasicString<unsigned short> (one pointer) */
+    char text[64]; unsigned n = 0;
+    ++g_gps_n;
+    g_vd.ctor(ws);
+    const unsigned short* w = g_vd.read(&parcel, ws) ? g_vd.c_str(ws) : 0;
+    for (; w && w[n] && n + 1 < sizeof text; ++n) text[n] = (char)w[n];
+    text[n] = 0;
+    g_vd.dtor(ws);
+    if (g_logs && (unsigned long)(mono_ms() - g_gps_log_ms) >= 1000UL) {
+        char b[96]; unsigned k = put_str(b, 0, "GPS n="); k = put_int(b, k, (int)g_gps_n);
+        k = put_str(b, k, " "); k = put_str(b, k, w ? text : "(read failed)"); b[k] = 0;
+        alog(b); g_gps_log_ms = mono_ms();
+    }
+    const char* p = text; int lat, lon;
+    if (!w || !parse_int(&p, &lat) || *p++ != ',' || !parse_int(&p, &lon)) return true;
+    if (!lat && !lon) return true;           /* no position yet (right after a CIC start) */
+    if (g_aa_input && g_aa_busy && g_aa_busy()) g_aa_input(CICAA_IN_LOCATION, lat, lon);
+    return true;
+}
+static void location_init(bmw::PluginApp* app) {
+    void* self = dlopen(0, 2);
+    AddDataUpdateHandler add = 0;
+    if (self) {
+        add = (AddDataUpdateHandler)dlsym(self, "_ZN3bmw9PluginApp20addDataUpdateHandlerEjRKNS_8DelegateIbRKNS_6ParcelEvvvEE");
+        g_vd.activate = (ActivateDataUpdate)dlsym(self, "_ZN3bmw9PluginApp18activateDataUpdateEjb");
+        g_vd.read = (ReadWString)dlsym(self, "_ZNK3bmw6Parcel11readWStringERNS_11BasicStringItEE");
+        g_vd.ctor = (WStringFn)dlsym(self, "_ZN3bmw11BasicStringItEC1Ev");
+        g_vd.dtor = (WStringFn)dlsym(self, "_ZN3bmw11BasicStringItED1Ev");
+        g_vd.c_str = (WStringCStr)dlsym(self, "_ZNK3bmw11BasicStringItE5c_strEv");
+    }
+    if (add && g_vd.activate && g_vd.read && g_vd.ctor && g_vd.dtor && g_vd.c_str) {
+        Handler h; h.object = app; h.stub = &onLocation;
+        add(app, DATA_LOCATION, h);
+        g_vd.ok = 1;
+    }
+    alog_val("GPS data update", g_vd.ok);
+}
+static void location_activate(bmw::PluginApp* app) {
+    if (g_vd.ok) g_vd.activate(app, DATA_LOCATION, true);
+}
+
 extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
                             const bmw::Bundle& dependencies, const bmw::Bundle& parameters) {
     if (!name || !*name) return 0;
@@ -1053,6 +1125,7 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     app->addHandlerWithMap(AA_SCREEN, 1, focus);
     app->addHandlerWithMap(PAGE_MAIN, 1, page);         /* page opened -> fresh status line */
     app->addHandlerWithMap(PAGE_MAIN_FIRST, 1, page);
+    location_init(app);
     g_hmi_tid = pthread_self();
     g_ui_ready = (pthread_mutex_init(g_ui_mtx, 0) == 0);
     g_app = app;

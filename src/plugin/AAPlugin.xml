@@ -14,6 +14,7 @@
     <models>
       <raDataModel id="182" />
       <raDataModel id="186" />
+      <raDataRequestModel id="230" modelType="vehicle.location" />
     </models>
     <hmiStates>
       <hmiState id="10" text="Android Auto">

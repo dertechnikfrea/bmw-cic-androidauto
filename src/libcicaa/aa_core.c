@@ -255,6 +255,10 @@ static int send_sd_response(aa_t *a)
        sensor the phone follows its own setting (automatic = by sunset). */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 13); pb_msg(&sub, 1, &item);
+    /* LOCATION(1): the CIC's own position (dead reckoning with wheel/gyro sensors, so it
+       stays good in tunnels, car parks and street canyons) is forwarded from the plugin,
+       see input_drain(). The phone uses it for navigation instead of its own GPS. */
+    memset(&item, 0, sizeof item); pb_u(&item, 1, 1); pb_msg(&sub, 1, &item);
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
     /* channel 3: video H.264 800x480 (UI area 720x360, see aap_paths.h), 30 fps (v19), dpi 140 */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
@@ -367,6 +371,28 @@ static void input_drain(aa_t *a)
             memset(&ev, 0, sizeof ev); pb_u(&ev, 1, 1);
             send_msg(a, CH_CONTROL, 0, M_SHUTDOWN_REQ, ev.b, ev.n);
             a->lg("V58 disconnect: SHUTDOWN_REQUEST sent");
+            continue;
+        }
+        if (kind == CICAA_IN_LOCATION) {
+            /* V61: CIC position from the plugin (RHMI data model vehicle.location, text
+               "lat,lon" in CIC units: 2^32 = 360 degrees) -> SensorEvent{1 LocationData{
+               1 timestamp, 2 latitude_e7, 3 longitude_e7, 4 accuracy_e3}} on the sensor
+               channel. e7 = raw * 360e7 / 2^32 = (raw * 1.8e9) >> 31. Accuracy is reported
+               as 10 m. Only sent once video runs (the session is fully up). The plugin
+               delivers about one position per second. Car test: AA navigation followed the
+               car smoothly, also in tunnels and an underground car park. */
+            static unsigned gps_sent;
+            int lat_e7 = (int)(((long long)code * 1800000000LL) >> 31);
+            int lon_e7 = (int)(((long long)val * 1800000000LL) >> 31);
+            if (!a->vframes) continue;
+            memset(&ev, 0, sizeof ev); memset(&item, 0, sizeof item);
+            ts = mono_us();
+            pb_u(&item, 1, (unsigned long)(ts & 0xffffffffUL));
+            pb_s32(&item, 2, lat_e7); pb_s32(&item, 3, lon_e7); pb_u(&item, 4, 10000);
+            pb_msg(&ev, 1, &item);
+            send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
+            if (++gps_sent == 1 || !(gps_sent & 63))
+                a->lg("V61 GPS -> phone #%u lat_e7=%d lon_e7=%d", gps_sent, lat_e7, lon_e7);
             continue;
         }
         memset(&ev, 0, sizeof ev); memset(&outer, 0, sizeof outer); memset(&item, 0, sizeof item);
