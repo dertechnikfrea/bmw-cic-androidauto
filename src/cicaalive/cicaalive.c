@@ -93,7 +93,11 @@ static int on_cmd(void *ch, unsigned size, const unsigned char *m, void *user)
         pthread_mutex_lock(&d.mu);
         if (type == 4) d.started = 1;
         if (type == 5) d.stopped = 1;
-        if (type == 3) { d.errors++; if (code == 3) d.fatal = 1; else g_resync = 1; }
+        /* Every AVP_EVENT_ERROR ends the DSP session; live_session() then opens a new
+           one. Car finding: after a non-fatal stream error the old "resync" (header +
+           wait for IDR) often left the picture frozen until AA was reconnected, while a
+           fresh DSP session recovers in about a second (one short flicker). */
+        if (type == 3) { d.errors++; d.fatal = 1; (void)code; }
         pthread_cond_broadcast(&d.cv);
         pthread_mutex_unlock(&d.mu);
     }

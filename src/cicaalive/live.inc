@@ -309,6 +309,17 @@ static int live_once(ring_hdr *r, uint32_t vlead)
     return rc;
 }
 
+/* live_once until stopped: a fatal DSP error (see on_cmd) starts a new DSP session
+ * instead of ending cicaalive, so the picture comes back by itself. */
+static int live_session(ring_hdr *r, uint32_t vlead)
+{
+    for (;;) {
+        int rc = live_once(r, vlead);
+        if (!d.fatal || stop_requested()) return rc;
+        lg("DSP error -> new DSP session");
+    }
+}
+
 static int live(int secs_unused)
 {
     ring_hdr *r; int rc = 1, f, order[4], n = 0, i; uint32_t vlead = AAP_VLEAD_MS * 1000u;
@@ -341,8 +352,8 @@ static int live(int secs_unused)
     if (!g_ar) { n = 0; order[n++] = FMT_AAC; }
     for (i = 0; i < n && !stop_requested(); i++) {
         g_fmt = order[i];
-        rc = live_once(r, vlead);
-        if (rc == 1 && g_fmt == FMT_AAC) { int k; for (k = 0; k < 3 && rc == 1 && !stop_requested(); k++) { lg("AAC init retry %d", k + 1); sleep(1); rc = live_once(r, vlead); } }
+        rc = live_session(r, vlead);
+        if (rc == 1 && g_fmt == FMT_AAC) { int k; for (k = 0; k < 3 && rc == 1 && !stop_requested(); k++) { lg("AAC init retry %d", k + 1); sleep(1); rc = live_session(r, vlead); } }
         if (rc != 2) break;
         usleep(300000);
     }
