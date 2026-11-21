@@ -262,6 +262,43 @@ static int data(const unsigned char *s, uint32_t len)
     return 0;
 }
 
+/* ---------------- 1 MiB boundary of the DSP video buffer ----------------
+ * Car finding (2026-11): the DM642 firmware keeps the video elementary stream in a
+ * 1 MiB ring. A NAL unit that straddles the 1 MiB wrap is decoded wrongly: freezes,
+ * flicker or block artefacts, and in the log an AVP_EVENT_ERROR roughly every 1-2 min
+ * with a static map (small P-frames, so the wrap is hit at regular intervals).
+ * Fix: count the stream bytes the DSP stores (avcC + NAL data) and, when a frame ends
+ * in the last 60 KB before a 1 MiB boundary, append an H.264 filler NAL (type 12,
+ * ignored by the decoder) that runs 4 KB past the boundary. The next frame then always
+ * starts behind the boundary, even if the count is a few bytes off. Frames larger than
+ * 60 KB could still cross it; with AA at 800x480 none was seen. Result in the car:
+ * zero DSP errors over long drives ("PAD <n> -> <pos>" lines in cicaalive.log).
+ * The counting (only avcC and NAL bytes, reset at the first packet of a DSP session)
+ * is exactly what was tested; it was found empirically, not from DSP documentation. */
+#define VBUF_RING   0x100000u        /* DSP video ring size */
+#define VBUF_GUARD  0xf000u          /* frame ends closer than this to the wrap -> pad */
+#define VBUF_OVER   0x1000u          /* filler runs this far past the wrap */
+static uint32_t g_vpos;              /* bytes stored in the DSP video ring this session */
+static unsigned char g_filler[VBUF_GUARD + VBUF_OVER];
+static int video_data(const unsigned char *s, uint32_t len)
+{
+    uint32_t rem, pad;
+    if (data(s, len)) return -1;
+    g_vpos += len;
+    rem = (0u - g_vpos) & (VBUF_RING - 1);       /* bytes to the next boundary (0 = on it) */
+    if (rem >= VBUF_GUARD) return 0;
+    pad = rem + VBUF_OVER;
+    memset(g_filler, 0xff, pad);
+    g_filler[0] = 0; g_filler[1] = 0;             /* 4-byte NAL length (AVC format), < 64 KB */
+    g_filler[2] = (unsigned char)((pad - 4) >> 8); g_filler[3] = (unsigned char)(pad - 4);
+    g_filler[4] = 12;                             /* nal_unit_type 12 = filler data */
+    g_filler[pad - 1] = 0x80;                     /* rbsp stop bit */
+    if (data(g_filler, pad)) return -1;
+    g_vpos += pad;
+    lg("PAD %u -> %u", (unsigned)pad, (unsigned)g_vpos);
+    return 0;
+}
+
 /* video stream header, as writer_dm642 emitted for cic_f2 (car_logs/v46 capture) */
 static int send_header(const uint8_t *avcc, uint32_t n, unsigned w, unsigned h)
 {
@@ -277,6 +314,8 @@ static int send_header(const uint8_t *avcc, uint32_t n, unsigned w, unsigned h)
     if (prop(121, 3, 0) || prop(121, 0x20, 0x80000002u) || prop(121, 0x21, 0x41564331u) ||
         prop(121, 0x24, 0x1f) || prop(30, 0, 2) || data(blob, sizeof blob) ||
         prop(121, 3, 0) || data(avcc, n)) return -1;
+    if (d.mra == 0) g_vpos = 0;      /* first packet of this DSP session: empty ring */
+    g_vpos += n;
     lg("HEADER avcC=%u %ux%u", (unsigned)n, w, h);
     return 0;
 }

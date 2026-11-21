@@ -276,7 +276,7 @@ static int live_once(ring_hdr *r, uint32_t vlead)
             if (frames == 0) { if (prop(121, 3, 0) || prop(9, 0, 0x8fa5) || prop(14, 0, 0)) { rc = 1; break; } }
             else if (g_vmode == 1 && g_clk) { if (prop(121, 3, 0)) { rc = 1; break; } }          /* free-run: no PTS */
             else if (prop(121, 3, 0) || prop(14, 0, g_vmode == 2 && g_clk ? 0xffffffffu : pts)) { rc = 1; break; }
-            if (data(rbuf + rp + sizeof h, h.len) || pkt_flush()) { rc = 1; break; }
+            if (video_data(rbuf + rp + sizeof h, h.len) || pkt_flush()) { rc = 1; break; }
             if (waiting_idr) lg("FIRST IDR sent len=%u", (unsigned)h.len);
             if (!g_clk && !prefilled) {
                 uint64_t tw;
