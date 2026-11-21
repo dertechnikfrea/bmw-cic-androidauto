@@ -206,7 +206,7 @@ static int live_once(ring_hdr *r, uint32_t vlead)
     pid_t parent = getppid();
     d.h = d.dbg = d.cmd = d.strm = 0; d.have_mem = 0;
     d.buf_back = d.started = d.stopped = d.errors = d.fatal = 0; d.mra = 0;
-    g_clk = 0; g_afull = 0; g_resync = 0; g_apts = 0; g_aframes = 0;
+    g_clk = 0; g_afull = 0; g_resync = 0; g_apts = 0; g_aframes = 0; g_drain_since = 0;
     memset(g_ac, 0, sizeof g_ac);
     if (g_ar) { int c; for (c = 0; c < 3; c++) { g_ac[c].rpos = g_ar->wpos[c]; g_ac[c].gen = g_ar->gen[c]; } }
     r->rpos = r->wpos; r->want_idr = 1;
@@ -217,9 +217,15 @@ static int live_once(ring_hdr *r, uint32_t vlead)
         uint32_t rp, wp; ring_rec h; uint64_t now;
         if (getppid() != parent) { lg("parent gone -> exit"); break; }
         rp = r->rpos; wp = r->wpos; now = now_us();
-        if (g_resync) {                    /* v53: EVT_STREAM_ERROR (video, non fatal) -> resend header, wait IDR */
-            g_resync = 0; cfg_gen = 0; waiting_idr = 1; r->want_idr = 1; last_idr_req = now;
-            lg("STREAM ERROR -> resync: header + wait IDR (errors=%d)", d.errors);
+        if (g_resync) {                    /* fresh start / backlog watchdog (cicaalive.c) */
+            /* Header again and skip frames until an IDR, but do NOT ask for the IDR yet:
+               backlog_watch() requests it once the DSP has shown everything sent before
+               now, so the IDR does not queue up behind the old backlog. Fallback: the
+               periodic re-request below fires 2.8 s from now. */
+            g_resync = 0; cfg_gen = 0; waiting_idr = 1;
+            last_idr_req = now - 200000u;
+            g_drain_since = (uint32_t)now ? (uint32_t)now : 1u;
+            lg("RESYNC: drain backlog, IDR request delayed");
         }
         /* 1.0.1: debug level 10 is only needed to see the clock start (~11 msgs/s cost
            DSP cycles). 1 s after the clock runs, drop it to 1 (events/errors still arrive
@@ -345,6 +351,7 @@ static int live(int secs_unused)
     lg("video lead %u ms dsp_dbg=%u mode=%s", (unsigned)(vlead / 1000), g_dbglvl, g_vmode == 1 ? "nopts" : g_vmode == 2 ? "pts-1" : "pts");
     r = ring_open(); if (!r) { lg("ring open failed errno=%d", errno); return 1; }
     r->reader_pid = (uint32_t)getpid();
+    g_ring = r;
     g_ar = aring_open();
     lg("RING attached size=%u cfg_len=%u frames_in=%u drop=%u %ux%u audio_ring=%s", (unsigned)r->size, (unsigned)r->cfg_len,
        (unsigned)r->frames_in, (unsigned)r->frames_drop, (unsigned)r->width, (unsigned)r->height, g_ar ? "ok" : "FAILED");

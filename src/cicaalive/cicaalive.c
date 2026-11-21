@@ -112,6 +112,64 @@ static int on_buf(void *ch, unsigned x, void *u)
  * PTS = arrival - clock_start + 150 ms so they show right after arrival. */
 static volatile int g_clk, g_afull;
 static volatile uint64_t g_clk_us;
+/* ---------------- display delay control (logger thread) ----------------
+ * Car finding: the DSP shows frames strictly in its own clock and the phone delivers
+ * slightly faster, so the queue between arrival and display grows (~+1 ms per second,
+ * from ~190 ms after a fresh start up to >1 s while scrolling). Shifting timestamps
+ * does not help (tested). What helps is to let the DSP play out what it has, skip new
+ * frames until a fresh IDR and start again with an empty queue ("resync").
+ *  - fresh start: once, 2.5 s after the DSP clock started (the start-up backlog is
+ *    the biggest one). A second fresh start at 5 s caused a visible double flicker.
+ *  - watchdog: if the delay stays above 350 ms for 2 s (not in the first 6 s, at most
+ *    every 30 s) -> resync. Result: ~190-350 ms instead of growing without limit, with
+ *    one short flicker when it triggers.
+ * Delay = time since clock start - PTS of the frame the DSP just shows. The DSP time
+ * update message (0xe7, type 1) carries that PTS at offset 20 in 45 kHz ticks.
+ * Resync itself (main loop, live.inc): header again + wait for IDR, but the IDR is only
+ * requested once all frames sent before the resync have been shown (g_drain_since),
+ * otherwise the new IDR queues up behind the old backlog. Fallback after 2.7/2.8 s.
+ * NOTE: with logs OFF the DSP debug level drops to 1 after 1 s (see live.inc). The
+ * fresh start does not depend on DSP messages; whether the type 1 messages (and thus
+ * the watchdog/drain) still arrive at level 1 was not verified in the car. */
+static ring_hdr *g_ring;                  /* set in live() */
+static volatile uint32_t g_drain_since;   /* now_us() low 32 bits at resync, 0 = no drain pending */
+static int g_fresh;                       /* fresh starts done in this DSP session */
+static uint32_t g_last_shown, g_over_since, g_last_trigger;
+static void fresh_start_check(void)
+{
+    if (!g_clk) { g_fresh = 0; return; }
+    if (g_fresh >= 1 || now_us() - g_clk_us < 2500000u) return;
+    g_fresh++; g_resync = 1;
+    lg("FRESH START %d", g_fresh);
+}
+static void backlog_watch(const unsigned char *b, unsigned n)
+{
+    uint32_t now, elapsed, shown45, shown, since; int32_t delay;
+    if (!g_clk || n < 24) return;
+    now = (uint32_t)now_us(); elapsed = now - (uint32_t)g_clk_us;
+    memcpy(&shown45, b + 20, 4);
+    if (!shown45 || shown45 == g_last_shown) return;          /* only when a new frame is shown */
+    g_last_shown = shown45;
+    shown = (uint32_t)((uint64_t)shown45 * 1000u / 45u);       /* 45 kHz -> us */
+    if (shown > elapsed + 1000000u) return;                     /* implausible */
+    delay = (int32_t)(elapsed - shown);
+    since = g_drain_since;
+    if (since) {                                                /* resync pending */
+        if (now - since >= 2700000u) { g_drain_since = 0; lg("DRAIN %d (timeout)", (int)delay); return; }
+        if ((int32_t)shown >= (int32_t)(since - (uint32_t)g_clk_us) - 100000) {
+            if (g_ring) g_ring->want_idr = 1;                   /* backlog shown -> fresh IDR now */
+            g_drain_since = 0; lg("DRAIN %d", (int)delay);
+        }
+        return;
+    }
+    if (elapsed < 6000000u) return;
+    if (delay <= 350000) { g_over_since = 0; return; }
+    if (!g_over_since) { g_over_since = now; return; }
+    if (now - g_over_since < 2000000u || now - g_last_trigger < 30000000u) return;
+    g_last_trigger = now; g_over_since = 0; g_resync = 1;
+    lg("BACKLOG %d us", (int)delay);
+}
+
 static void mq_drain(void)
 {
     for (;;) {
@@ -128,15 +186,17 @@ static void mq_drain(void)
             g_clk_us = now_us(); g_clk = 1; lg("CLOCK STARTED (DSP pipe ready) -> live PTS");
         }
         if (!g_afull && strstr(txt, "Audio Pipe ES buffer is Full")) { g_afull = 1; lg("AUDIO PIPE FULL seen"); }
+        if (n > 6 && b[6] == 0xe7 && type == 1) backlog_watch(b, n);
         if (n > 6 && b[6] == 0xe7 && type == 3) lg("DSP AVP_EVENT_ERROR code=%u", (unsigned)code);
         else if (n > 6 && b[6] == 0xe7 && type == 4) lg("DSP AVP_EVENT_STARTED");
         else if (n > 6 && b[6] == 0xe7 && type == 5) lg("DSP AVP_EVENT_STOPPED");
+        else if (type == 1) ;          /* DSP progress messages (~20/s, binary payload): not logged */
         else if (k > 3) lg("DSP(%02x/%u size=%u) %s", n > 6 ? b[6] : 0, (unsigned)type, size, txt);
         else lg("DSP msg id=0x%02x type=%u size=%u", n > 6 ? b[6] : 0, (unsigned)type, size);
     }
     if (mq_lost) { lg("DSP msgs lost=%u", (unsigned)mq_lost); mq_lost = 0; }
 }
-static void *logger(void *u) { (void)u; while (!g_quit) { mq_drain(); usleep(50000); } mq_drain(); return 0; }
+static void *logger(void *u) { (void)u; while (!g_quit) { mq_drain(); fresh_start_check(); usleep(50000); } mq_drain(); return 0; }
 /* SIGSEGV/SIGBUS: async-safe line with fault address, then exit 139. */
 static int g_logfd = -1;
 static void hexw(char *o, unsigned v) { int i; for (i = 7; i >= 0; i--) { o[i] = "0123456789abcdef"[v & 15]; v >>= 4; } }

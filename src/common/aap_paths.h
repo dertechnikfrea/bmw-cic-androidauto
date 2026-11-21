@@ -23,5 +23,8 @@
 #define AAP_MARGIN_W  160
 #define AAP_MARGIN_H  160
 #define AAP_GEOM      {80, 80, 640, 320, 160, 0, 960, 480}
-#define AAP_VLEAD_MS  300
+/* Video lead: PTS = arrival + lead. Car tests: 50 ms gives clearly the most direct
+ * response; 150/300 ms only add latency (the DSP shows frames in its own clock anyway).
+ * vlead_ms.txt can still raise it. */
+#define AAP_VLEAD_MS  50
 #endif
