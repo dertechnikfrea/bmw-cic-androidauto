@@ -160,7 +160,15 @@ static int read_msg(aa_t *a, int timeout_ms)
             size_t hdr = ((fl & F_COMPLETE) == F_FIRST) ? 8 : 4;
             if (a->rxn < hdr + sz) break;
             if (fl & F_ENC) {
-                if (!a->ssl) { a->lg("AA encrypted frame before TLS"); return -3; }
+                if (!a->ssl) {
+                    /* Connect again after Disconnect without re-plugging: the phone may
+                       still send encrypted frames of the old session. Drop them instead of
+                       failing the new session. */
+                    memmove(a->rx, a->rx + hdr + sz, a->rxn - hdr - sz);
+                    a->rxn -= hdr + sz;
+                    a->lg("V60 skipped stale encrypted frame before TLS");
+                    continue;
+                }
                 tin_push(a, a->rx + hdr, sz);
                 for (;;) {
                     int r = mbedtls_ssl_read(a->ssl, a->msg + a->msgn, sizeof a->msg - a->msgn);
@@ -354,11 +362,21 @@ static void input_drain(aa_t *a)
         if (g_inr == g_inw) { pthread_mutex_unlock(&g_inmu); break; }
         { unsigned i = g_inr++ % 32; kind = g_inq[i].kind; code = g_inq[i].code; val = g_inq[i].val; }
         pthread_mutex_unlock(&g_inmu);
+        if (kind == CICAA_IN_BYEBYE) {
+            /* Disconnect button: ByeByeRequest{1 reason = 1 USER_SELECTION} on the control
+               channel. The phone closes AA cleanly and answers SHUTDOWN_RESPONSE (0x10),
+               which ends the session (dispatch). Before, AA kept running on the phone
+               after the CIC side stopped. */
+            memset(&ev, 0, sizeof ev); pb_u(&ev, 1, 1);
+            send_msg(a, CH_CONTROL, 0, M_SHUTDOWN_REQ, ev.b, ev.n);
+            a->lg("V58 disconnect: SHUTDOWN_REQUEST sent");
+            continue;
+        }
         memset(&ev, 0, sizeof ev); memset(&outer, 0, sizeof outer); memset(&item, 0, sizeof item);
         ts = mono_us();
         pb_var(&ev, (1UL << 3)); pb_var(&ev, (unsigned long)(ts & 0xffffffffUL));   /* 32-bit us, wraps after 71 min */
         pb_u(&item, 1, (unsigned long)code);
-        if (kind == 1) { pb_u(&item, 2, val ? 1 : 0); pb_u(&item, 3, 0); pb_u(&item, 4, 0); pb_msg(&outer, 1, &item); pb_msg(&ev, 4, &outer); }
+        if (kind == CICAA_IN_KEY) { pb_u(&item, 2, val ? 1 : 0); pb_u(&item, 3, 0); pb_u(&item, 4, 0); pb_msg(&outer, 1, &item); pb_msg(&ev, 4, &outer); }
         else { pb_s32(&item, 2, val); pb_msg(&outer, 1, &item); pb_msg(&ev, 6, &outer); }
         send_msg(a, CH_INPUT, 0, 0x8001, ev.b, ev.n);
         a->lg("V49 input kind=%d code=%d val=%d", kind, code, val);
@@ -422,6 +440,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
         case M_SHUTDOWN_REQ:
             send_msg(a, CH_CONTROL, 0, M_SHUTDOWN_RESP, 0, 0);
             a->lg("AA phone requested shutdown");
+            return 1;
+        case M_SHUTDOWN_RESP:                 /* answer to our Disconnect (V58) */
+            a->lg("V58 phone confirmed shutdown");
             return 1;
         default:
             hexline(a, "AA ctrl body", b, n);

@@ -5,6 +5,7 @@
       <hmiAction id="3" target="10" />
       <raAction id="181" />
       <raAction id="185" />
+      <raAction id="187" />
       <hmiAction id="203" target="210" />
       <raAction id="211" />
       <raAction id="204" />
@@ -17,6 +18,7 @@
       <hmiState id="10" text="Android Auto">
         <components>
           <button id="11" action="181" text="Connect" />
+          <button id="15" action="187" text="Disconnect" />
           <button id="12" action="185" text="Zoom Mode" />
           <button id="14" action="204" text="Logging" />
           <label id="13" text="Screen: " model="186" />

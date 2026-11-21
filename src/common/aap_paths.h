@@ -42,4 +42,8 @@
  * response; 150/300 ms only add latency (the DSP shows frames in its own clock anyway).
  * vlead_ms.txt can still raise it. */
 #define AAP_VLEAD_MS  50
+/* cicaa_input(kind, code, value) kinds (plugin -> libcicaa queue) */
+#define CICAA_IN_KEY      1   /* code = Android keycode, value 1 down / 0 up */
+#define CICAA_IN_REL      2   /* rotary: code 65536, value = signed steps */
+#define CICAA_IN_BYEBYE   7   /* Disconnect button: end the AA session properly */
 #endif

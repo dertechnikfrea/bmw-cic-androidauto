@@ -1,6 +1,6 @@
 /* AAPlugin: Android Auto for the BMW CIC HIGH (QNX 6.3.2, SH4, HmiMain 9283417A).
  *
- * One HMI page: [Connect] [Zoom Mode] [Logging] + one status line "Screen: ...".
+ * One HMI page: [Connect] [Disconnect] [Zoom Mode] [Logging] + one status line "Screen: ...".
  *
  *  Connect  -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
  *           -> patched DM642 DSP image is linked in RAM (dspload on) once per boot.
@@ -10,6 +10,7 @@
  *           -> our TerminalUI page (210) takes the iDrive: rotary/push/directions go
  *              to the phone. MENU leaves AA (it keeps running); pressing
  *              Connect again brings it back. The AA "exit" icon also leaves.
+ *  Disconnect -> ends the AA session on the phone too (ByeByeRequest).
  *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
  *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
@@ -104,7 +105,7 @@ typedef char delegate_must_be_two_words[sizeof(Handler) == 8 ? 1 : -1];
  * but have new jobs (185 was Logs, 204 the toolbar Back button of the AA page). */
 enum {
     ACTION_BACK_MAIN = 3,          /* hmiAction -> page 10 */
-    ACTION_CONNECT = 181, ACTION_ZOOM = 185, ACTION_LOGS = 204,
+    ACTION_CONNECT = 181, ACTION_ZOOM = 185, ACTION_LOGS = 204, ACTION_DISCONNECT = 187,
     MODEL_STATUS = 182,            /* connection status text (kept, no label on the page) */
     MODEL_SCREEN = 186,            /* "Screen: <mode>[ | Logs ON]" line */
     PAGE_MAIN = 10, PAGE_MAIN_FIRST = 11,
@@ -224,9 +225,9 @@ static void aa_forward_key(const unsigned* v, unsigned valid) {
         char b[80]; unsigned n = put_str(b, 0, "KEY "); n = put_int(b, n, (int)key);
         n = put_str(b, n, " steps="); n = put_int(b, n, (int)steps); n = put_str(b, n, " down="); n = put_int(b, n, down); b[n] = 0; alog(b);
     }
-    if (key == 13) g_aa_input(2, 65536, (int)steps);          /* rotary clockwise */
-    else if (key == 14) g_aa_input(2, 65536, -(int)steps);    /* rotary counter-clockwise */
-    else if (key < 64 && g_keymap[key]) g_aa_input(1, g_keymap[key], down);
+    if (key == 13) g_aa_input(CICAA_IN_REL, 65536, (int)steps);          /* rotary clockwise */
+    else if (key == 14) g_aa_input(CICAA_IN_REL, 65536, -(int)steps);    /* rotary counter-clockwise */
+    else if (key < 64 && g_keymap[key]) g_aa_input(CICAA_IN_KEY, g_keymap[key], down);
 }
 typedef bmw::Map<unsigned, bmw::Variant> KeyMap;
 typedef bmw::Delegate<bool, const KeyMap&, void, void, void> KeyHandler;
@@ -977,6 +978,13 @@ static void status_line(bmw::PluginApp* app) {
     ui(app, MODEL_SCREEN, b);
 }
 static bool onPageFocus(void* obj, const KeyMap&) { status_line(static_cast<bmw::PluginApp*>(obj)); return false; }
+/* Disconnect: ask libcicaa to end the AA session properly (ByeByeRequest). The phone
+ * closes AA, the poll thread sees the session end and stops the display. A later
+ * Connect works without re-plugging the cable (libcicaa V59/V60). */
+static bool onDisconnect(void*, const bmw::Parcel&) {
+    if (g_aa_busy && g_aa_busy() && g_aa_input) { g_aa_input(CICAA_IN_BYEBYE, 0, 0); alog("Disconnect pressed"); }
+    return true;
+}
 static bool onZoom(void* obj, const bmw::Parcel&) {
     screen_mode_next();
     status_line(static_cast<bmw::PluginApp*>(obj));
@@ -1001,6 +1009,7 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     if (!app) return 0;
     g_logs = file_exists(AAP_LOGS_ON);
     add(app, ACTION_CONNECT, &onConnect);
+    add(app, ACTION_DISCONNECT, &onDisconnect);
     add(app, ACTION_ZOOM, &onZoom);
     add(app, ACTION_LOGS, &onLogs);
     KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus}, page = {app, &onPageFocus};

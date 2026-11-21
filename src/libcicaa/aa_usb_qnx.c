@@ -267,6 +267,17 @@ int aa_usb_open(aa_log_fn lg, aa_status_fn st, int wait_s, aa_transport_t *t)
     sleep(2);   /* let existing devices be reported */
     for (s = 0; s < wait_s; ++s) {
         if (find_inst(1, &in)) {
+            if (!switched) {
+                /* Already in accessory mode before we switched it: left over from the previous
+                   session (Disconnect, or AA stopped on the phone) and the phone's AA is not
+                   listening any more. Car test (Pixel 4a): AA starts again only after a new AOA
+                   START and a long pause; attaching right away failed until the cable was
+                   re-plugged. Once per open. */
+                lg("V59 accessory already active -> AOA restart, wait 8 s");
+                rc = aoa_switch(&in);
+                switched = 1;
+                if (rc > 0) { sleep(8); continue; }
+            }
             lg("USB accessory present vid=%04x pid=%04x", (unsigned)in.ident.vendor, (unsigned)in.ident.device);
             st("AA: AOA accessory detected");
             sleep(1);
