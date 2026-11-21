@@ -1,12 +1,15 @@
 /* Shared paths and switches. Every component (plugin, libcicaa, cicaalive,
  * dspload) uses only these. Nothing under AAP_DIR is written at runtime except
- * logs, and only while AAP_LOGS_ON exists (the plugin's "Logs" button). */
+ * logs (only while AAP_LOGS_ON exists, "Logging" button) and the small mode files of
+ * the plugin's buttons (zoom.on / wide.on, later aaaudio.on). */
 #ifndef AAP_PATHS_H
 #define AAP_PATHS_H
 #define AAP_VERSION   "1.0"
 #define AAP_DIR       "/mnt/hbdebug/aap"            /* HDD: binaries + certificate (installer) */
 #define AAP_LOGS_ON   AAP_DIR "/logs.on"            /* exists = logging enabled */
 #define AAP_LOGDIR    AAP_DIR "/logs"               /* log files (only when enabled) */
+#define AAP_ZOOM_ON   AAP_DIR "/zoom.on"            /* screen mode Fullscreen (Zoom Mode button) */
+#define AAP_WIDE_ON   AAP_DIR "/wide.on"            /* screen mode Stretched */
 #define AAP_LIB       AAP_DIR "/libcicaa.so"
 #define AAP_LIVE      AAP_DIR "/cicaalive"
 #define AAP_DSPLOAD   AAP_DIR "/dspload"
@@ -32,7 +35,9 @@
 #define AAP_UI_MARGIN_RIGHT  80
 /* sx sy sw sh (crop in the 800x480 stream), dx dy dw dh (on the 1280x480 display).
  * x = 256 leaves the CIC's left arc/menu column visible and centres the picture. */
-#define AAP_GEOM      {0, 0, 720, 360, 256, 0, 960, 480}
+#define AAP_GEOM_NORMAL     {0, 0, 720, 360, 256, 0,  960, 480}
+#define AAP_GEOM_FULLSCREEN {0, 0, 720, 360,   0, 0,  960, 480}   /* same size, no CIC menu */
+#define AAP_GEOM_STRETCHED  {0, 0, 720, 360,   0, 0, 1280, 480}   /* full width, distorted */
 /* Video lead: PTS = arrival + lead. Car tests: 50 ms gives clearly the most direct
  * response; 150/300 ms only add latency (the DSP shows frames in its own clock anyway).
  * vlead_ms.txt can still raise it. */

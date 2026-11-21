@@ -1,6 +1,6 @@
 /* AAPlugin: Android Auto for the BMW CIC HIGH (QNX 6.3.2, SH4, HmiMain 9283417A).
  *
- * One HMI page: [Connect Android Auto] [Logs ON/OFF] + one status line.
+ * One HMI page: [Connect] [Zoom Mode] [Logging] + one status line "Screen: ...".
  *
  *  Connect  -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
  *           -> patched DM642 DSP image is linked in RAM (dspload on) once per boot.
@@ -8,9 +8,10 @@
  *              (audio C4, video source 8 -> sink 1, StartVideo, geometry, layer 26,
  *              menu layer alpha 0) and the cicaalive process feeds the DSP.
  *           -> our TerminalUI page (210) takes the iDrive: rotary/push/directions go
- *              to the phone. MENU or Back leaves AA (it keeps running); pressing
+ *              to the phone. MENU leaves AA (it keeps running); pressing
  *              Connect again brings it back. The AA "exit" icon also leaves.
- *  Logs     -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
+ *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
+ *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
  *
  * Private HmiMain ABI (fixed addresses) is checked against code signatures before
@@ -99,12 +100,15 @@ typedef char pointer_must_be_32_bits[sizeof(void*) == 4 ? 1 : -1];
 typedef bmw::Delegate<bool, const bmw::Parcel&, void, void, void> Handler;
 typedef char delegate_must_be_two_words[sizeof(Handler) == 8 ? 1 : -1];
 
-/* IDs must match AAPlugin.xml. */
+/* IDs must match AAPlugin.xml. 185 and 204 keep their numbers from the first release
+ * but have new jobs (185 was Logs, 204 the toolbar Back button of the AA page). */
 enum {
     ACTION_BACK_MAIN = 3,          /* hmiAction -> page 10 */
-    ACTION_CONNECT = 181, ACTION_LOGS = 185,
-    MODEL_STATUS = 182, MODEL_LOGS = 186,
-    AA_SCREEN = 210, AA_KEYS = 211, ACTION_AA_BACK = 204,
+    ACTION_CONNECT = 181, ACTION_ZOOM = 185, ACTION_LOGS = 204,
+    MODEL_STATUS = 182,            /* connection status text (kept, no label on the page) */
+    MODEL_SCREEN = 186,            /* "Screen: <mode>[ | Logs ON]" line */
+    PAGE_MAIN = 10, PAGE_MAIN_FIRST = 11,
+    AA_SCREEN = 210, AA_KEYS = 211,
     EVENT_OPEN_AA = 202, EVENT_MAIN = 206
 };
 
@@ -170,6 +174,7 @@ static const char* snap(const char* src, char* buf, unsigned int cap) {
     if (src) for (; i + 1 < cap && src[i]; ++i) buf[i] = src[i];
     buf[i] = 0; return buf;
 }
+static void status_line(bmw::PluginApp* app);
 static void add(bmw::PluginApp* app, unsigned id, bool (*stub)(void*, const bmw::Parcel&)) {
     Handler h; h.object = app; h.stub = stub; app->addHandler(id, h);
 }
@@ -250,11 +255,6 @@ static void key_sample(int focus, const KeyMap* map) {
 }
 static bool onKeys(void*, const KeyMap& map) { key_sample(0, &map); return false; }
 static bool onFocus(void*, const KeyMap& map) { key_sample(1, &map); return false; }
-static bool onAaBack(void* obj, const bmw::Parcel&) {
-    if (g_live_disp) { g_live_user = 0; alog("Back -> leave AA display"); }
-    static_cast<bmw::PluginApp*>(obj)->triggerEvent(EVENT_MAIN);
-    return true;
-}
 
 /* ======================= native HMI video route ======================= */
 #include "iba_state.h"
@@ -407,11 +407,25 @@ static int iba_snapshot_rect() {
 }
 static int g_dsp_pid = 0;
 static int g_dsp_attempted = 0;
-/* Built-in geometry (geom.txt is gone: the layout must match what libcicaa asks the
+/* Screen mode (Zoom Mode button), stored as files so it survives a CIC restart:
+ *   none     -> 0 Normal:     picture centred (x 256..1216), CIC menu/arcs stay visible
+ *   zoom.on  -> 1 Fullscreen: same size from x = 0, CIC menu layer hidden, rest black
+ *   wide.on  -> 2 Stretched:  stretched to the full 1280 px width, CIC menu hidden
+ * Built-in geometry (geom.txt is gone: the layout must match what libcicaa asks the
  * phone for, so a free text file only caused broken pictures). */
+static int screen_mode() {
+    if (file_exists(AAP_WIDE_ON)) return 2;
+    return file_exists(AAP_ZOOM_ON) ? 1 : 0;
+}
+static void screen_mode_next() {
+    int m = (screen_mode() + 1) % 3;
+    unlink(AAP_ZOOM_ON); unlink(AAP_WIDE_ON);
+    if (m) { int f = open(m == 1 ? AAP_ZOOM_ON : AAP_WIDE_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+}
 static void geom_load(short* g) {
-    static const short def[8] = AAP_GEOM;
-    for (int i = 0; i < 8; ++i) g[i] = def[i];
+    static const short def[3][8] = {AAP_GEOM_NORMAL, AAP_GEOM_FULLSCREEN, AAP_GEOM_STRETCHED};
+    int m = screen_mode();
+    for (int i = 0; i < 8; ++i) g[i] = def[m][i];
 }
 static int iba_apply_geometry(bmw::PluginApp*) {
     /* The BMW DVD service never publishes norm/format here (we feed the DSP ourselves):
@@ -625,7 +639,7 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
         ((SetAlpha)vt[14])(g_iba_mgr, 26, 0);
         typedef void (*Enable)(int); ((Enable)kLayerHelper)(1); g_iba_layer = 1;
         g_iba.ack(op, 0, 1);
-        menu_hide_for_video();
+        if (screen_mode() != 0) menu_hide_for_video();   /* Normal keeps the CIC menu visible */
         return;
     }
     if (g_iba.stopping && !live_reap()) return;
@@ -920,6 +934,7 @@ static void* aa_poll_thread(void*) {
 }
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
+    status_line(app);
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
@@ -951,7 +966,22 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     ui(app, MODEL_STATUS, "Connect the phone via USB...");
     return true;
 }
-static void logs_show(bmw::PluginApp* app) { ui(app, MODEL_LOGS, g_logs ? "ON (" AAP_LOGDIR ")" : "OFF"); }
+/* The one status line of the page: "Screen: Normal[ | Logs ON]". Refreshed when the page
+ * opens (also via a programmed favourite button) and after every button press. */
+static void status_line(bmw::PluginApp* app) {
+    static const char* const kMode[3] = {"Normal", "Fullscreen", "Stretched"};
+    char b[96]; unsigned n = put_str(b, 0, "Screen: ");
+    n = put_str(b, n, kMode[screen_mode()]);
+    if (g_logs) n = put_str(b, n, " | Logs ON");
+    b[n] = 0;
+    ui(app, MODEL_SCREEN, b);
+}
+static bool onPageFocus(void* obj, const KeyMap&) { status_line(static_cast<bmw::PluginApp*>(obj)); return false; }
+static bool onZoom(void* obj, const bmw::Parcel&) {
+    screen_mode_next();
+    status_line(static_cast<bmw::PluginApp*>(obj));
+    return true;
+}
 static bool onLogs(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
     if (g_logs) { unlink(AAP_LOGS_ON); g_logs = 0; }
@@ -960,7 +990,7 @@ static bool onLogs(void* obj, const bmw::Parcel&) {
         int f = open(AAP_LOGS_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (f >= 0) { close(f); g_logs = 1; alog("=== logs ON, AAPlugin " AAP_VERSION " ==="); }
     }
-    logs_show(app);
+    status_line(app);
     return true;
 }
 
@@ -971,11 +1001,13 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     if (!app) return 0;
     g_logs = file_exists(AAP_LOGS_ON);
     add(app, ACTION_CONNECT, &onConnect);
+    add(app, ACTION_ZOOM, &onZoom);
     add(app, ACTION_LOGS, &onLogs);
-    add(app, ACTION_AA_BACK, &onAaBack);
-    KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus};
+    KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus}, page = {app, &onPageFocus};
     app->addHandlerWithMap(AA_KEYS, keys);
     app->addHandlerWithMap(AA_SCREEN, 1, focus);
+    app->addHandlerWithMap(PAGE_MAIN, 1, page);         /* page opened -> fresh status line */
+    app->addHandlerWithMap(PAGE_MAIN_FIRST, 1, page);
     g_hmi_tid = pthread_self();
     g_ui_ready = (pthread_mutex_init(g_ui_mtx, 0) == 0);
     g_app = app;
