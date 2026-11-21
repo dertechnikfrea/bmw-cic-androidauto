@@ -381,11 +381,20 @@ static void input_drain(aa_t *a)
         send_msg(a, CH_INPUT, 0, 0x8001, ev.b, ev.n);
         a->lg("V49 input kind=%d code=%d val=%d", kind, code, val);
     }
-    if (g_proj_req) {
-        pb_t f; g_proj_req = 0; g_proj = 1;
-        memset(&f, 0, sizeof f); pb_u(&f, 1, 1); pb_u(&f, 2, 0);
-        send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
-        a->lg("V49 projection requested by plugin -> focus PROJECTED");
+    {   /* IDR request of a (re)attached cicaalive: answered here, every <= 100 ms. 1.0 only
+           checked it in on_video(), i.e. when the phone sent a frame - which it does not do
+           while the screen is static, so the picture stayed black after a display restart. */
+        int idr = av_native_want_idr();
+        if (idr || g_proj_req) {
+            pb_t f; g_proj_req = 0; g_proj = 1;
+            if (idr) {                     /* NATIVE -> PROJECTED forces a fresh IDR */
+                memset(&f, 0, sizeof f); pb_u(&f, 1, 2); pb_u(&f, 2, 0);
+                send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
+            }
+            memset(&f, 0, sizeof f); pb_u(&f, 1, 1); pb_u(&f, 2, 0);
+            send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
+            a->lg("V49 focus PROJECTED (plugin / IDR request)");
+        }
     }
 }
 static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)

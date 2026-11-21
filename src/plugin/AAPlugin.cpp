@@ -196,6 +196,7 @@ static fn_void g_aa_project = 0;
 static volatile int g_aa_polling = 0;
 static volatile int g_live_disp = 0;      /* AA video on screen */
 static volatile int g_live_user = 0;      /* user wants AA on screen */
+static volatile int g_focus_left = 0;     /* AA display was left by a focus loss (MENU, PDC...) */
 static long g_live_disp_ms = 0;
 
 /* ---------------- iDrive -> Android keycodes ---------------- */
@@ -254,9 +255,21 @@ static void key_sample(int focus, const KeyMap* map) {
             }
         }
     }
-    if (!focus) { aa_forward_key(values, valid); return; }
+    if (!focus) {
+        /* First key on the (empty) AA page after a focus loss: bring the picture back
+           instead of sending the key to the phone (fallback for the focus path below). */
+        if (g_focus_left && !g_live_user && g_aa_polling) { g_live_user = 1; g_focus_left = 0; alog("key -> resume AA display"); return; }
+        aa_forward_key(values, valid);
+        return;
+    }
     /* MENU / leaving our page while AA is shown -> back to the car UI (AA keeps running). */
-    if (g_live_disp && (unsigned long)(mono_ms() - g_live_disp_ms) > 2000UL) { g_live_user = 0; alog("focus lost -> leave AA display"); }
+    if (g_live_disp) {
+        if ((unsigned long)(mono_ms() - g_live_disp_ms) > 2000UL) { g_live_user = 0; g_focus_left = 1; alog("focus lost -> leave AA display"); }
+        return;
+    }
+    /* Focus came back to the AA page (end of PDC/reverse camera, BACK from the menu, an
+       OPTION overlay closed...): resume the display by itself, the session never stopped. */
+    if (g_focus_left && g_aa_polling) { g_focus_left = 0; g_live_user = 1; alog("focus back -> resume AA display"); }
 }
 static bool onKeys(void*, const KeyMap& map) { key_sample(0, &map); return false; }
 static bool onFocus(void*, const KeyMap& map) { key_sample(1, &map); return false; }
@@ -887,8 +900,11 @@ static int dsp_patch_ensure() {
     return st == 0;
 }
 static volatile unsigned* g_ring = 0;
-static unsigned g_ring_base = 0xffffffffu;
-/* 1 when libcicaa has published SPS/PPS and a new frame this session. */
+/* 1 when libcicaa has published SPS/PPS (cfg_len > 0) for the running session.
+ * 1.0 also waited for a NEW frame after the display stop. Android Auto sends no frame
+ * while the screen does not change, so after OPTION/MENU -> Connect the picture often
+ * did not come back until the map moved. cicaalive asks for an IDR when it attaches
+ * (want_idr), and libcicaa now answers that request at once (input_drain). */
 static int live_video_ready() {
     if (!g_ring) {
         int fd = shm_open("/cicaa_live", 0 /* O_RDONLY */);
@@ -900,8 +916,7 @@ static int live_video_ready() {
     }
     /* ring_hdr: magic[0] size[1] wpos[2] rpos[3] reader_pid[4] want_idr[5] cfg_gen[6] cfg_len[7] frames_in[8] */
     if (g_ring[0] != 0x4c495631u) return 0;
-    if (g_ring_base == 0xffffffffu) { g_ring_base = g_ring[8]; return 0; }
-    return g_ring[7] > 0 && g_ring[8] != g_ring_base;
+    return g_ring[7] > 0;
 }
 static void status_show(bmw::PluginApp* app, const char* aa) {
     char line[200], v[160];
@@ -915,7 +930,7 @@ static void* aa_poll_thread(void*) {
     bmw::PluginApp* app = g_app;
     char st[96];
     int live_req = 0;
-    g_ring_base = 0xffffffffu; g_live_user = 1; keymap_load();
+    g_live_user = 1; keymap_load();
     alog("=== AA session ===");
     if (!dsp_patch_ensure()) { ui(app, MODEL_STATUS, "Could not load the patched DSP (reinstall)"); }
     while (app) {
@@ -927,7 +942,7 @@ static void* aa_poll_thread(void*) {
             live_req = 1; alog("AA video -> start display"); auto_request(1);
         } else if (!want && live_req) {
             live_req = 0; alog(proj ? "user left AA -> stop display" : "AA exit -> stop display");
-            auto_request(4); g_ring_base = 0xffffffffu;
+            auto_request(4);
         }
         if (!g_aa_busy()) break;
     }
@@ -943,7 +958,10 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
-        ui(app, MODEL_STATUS, "Returning to Android Auto...");
+        /* Start the display right here as well: if the poll thread's earlier request was
+           dropped (worker still closing after a quick OPTION -> Connect), pressing Connect
+           again now always brings AA back. auto_request() ignores it while busy. */
+        if (!g_live_disp && live_video_ready()) auto_request(1);
         return true;
     }
     if (auto_busy_control() || g_iba.owns_resources() || g_iba_layer || g_iba_source_changed) {
