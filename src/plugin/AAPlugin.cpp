@@ -15,6 +15,8 @@
  *  Switch Audio -> BT Audio (default: phone music over Bluetooth, CIC source kept) or
  *              AA Audio (all AA audio over USB -> DSP); takes effect at the next Connect.
  *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
+ *  Keys     -> in AA Audio mode the steering-wheel and panel skip keys go to the phone
+ *              as media next/previous (see key_hook()).
  *  GPS      -> the CIC position (RHMI data model vehicle.location) goes to the phone
  *              while AA runs (see onLocation()).
  *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
@@ -955,10 +957,12 @@ static void* aa_poll_thread(void*) {
     return 0;
 }
 static void location_activate(bmw::PluginApp* app);
+static void keys_install();
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
     status_line(app);
     location_activate(app);
+    keys_install();
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
@@ -1109,6 +1113,78 @@ static void location_activate(bmw::PluginApp* app) {
     if (g_vd.ok) g_vd.activate(app, DATA_LOCATION, true);
 }
 
+/* ======================= steering-wheel / panel skip keys -> phone ======================= */
+/* In AA Audio mode the music comes from the phone over USB, but the CIC sends the skip
+ * keys to its own active entertainment source: they never reach the plugin (TerminalUI
+ * only gets the controller). HmiMain exports the proxy classes by name, so the plugin
+ * replaces one entry of their vtables (in HmiMain's writable data, no code is patched):
+ *   CPxyControlElementsMFL::CSearchSwitch1   steering-wheel search keys
+ *   CPxyCECenterStack::CPushButtonSkip       |<< >>| under the CD/DVD slot
+ * vtable[8] is the message handler (this, msg). The hook calls the original first (the
+ * CIC behaves exactly as before), then reads the key state with the class getter
+ * (this, int*): 1 / 2 = pressed, 0 = released, every state arrives twice.
+ * Steering wheel: 1 = next, 2 = previous. Panel: 1 = previous, 2 = next.
+ * Only in AA Audio mode and while a session runs, the state goes to the phone as media
+ * key 87 NEXT / 88 PREVIOUS (down, then up on release); duplicates are dropped. In BT
+ * Audio mode nothing is sent: the CIC's Bluetooth source gets the keys as always.
+ * Safety: installed at the first Connect (not at create, so a mistake cannot cause a
+ * boot loop), only if the vtable entry and the first 12 bytes of the getter match
+ * HmiMain 9283417A; restored in aap_destroy. */
+typedef int (*MsgHandler)(void*, void*);
+typedef void (*KeyGetter)(void*, int*);
+static const unsigned long kKeyGetterSig[3] = {0x2f962f86UL, 0x2fe62fc6UL, 0xc70e4f22UL};
+struct KeyHook {
+    const char* vtable; unsigned long orig, getter; MsgHandler hook;
+    unsigned long* slot; const char* tag;
+};
+static int key_hook_mfl(void*, void*);
+static int key_hook_panel(void*, void*);
+static KeyHook g_kh[2] = {
+    {"_ZTVN22CPxyControlElementsMFL14CSearchSwitch1E", 0x08ba0bb0UL, 0x08ba0b60UL, &key_hook_mfl, 0, "KEY mfl"},
+    {"_ZTVN17CPxyCECenterStack15CPushButtonSkipE", 0x08b935dcUL, 0x08b9358cUL, &key_hook_panel, 0, "KEY panel"},
+};
+static int g_keys_tried = 0, g_key_held = 0;
+static void key_forward(int v) {
+    if (!g_iba_keep_audio || !g_aa_input || !g_aa_busy || !g_aa_busy()) return;
+    int code = v == 1 ? 87 : v == 2 ? 88 : 0;             /* KEYCODE_MEDIA_NEXT / _PREVIOUS */
+    if (!code) {                                           /* released */
+        if (v == 0 && g_key_held) { g_aa_input(CICAA_IN_KEY, g_key_held, 0); g_key_held = 0; }
+        return;
+    }
+    if (code == g_key_held) return;                        /* repeated state */
+    if (g_key_held) g_aa_input(CICAA_IN_KEY, g_key_held, 0);
+    g_aa_input(CICAA_IN_KEY, code, 1);
+    g_key_held = code;
+}
+static int key_hook(int which, void* self, void* msg) {
+    int rc = ((MsgHandler)g_kh[which].orig)(self, msg);   /* CIC first, unchanged */
+    int v = -1;
+    ((KeyGetter)g_kh[which].getter)(self, &v);
+    alog_val(g_kh[which].tag, v);
+    if (which == 1 && (v == 1 || v == 2)) v = 3 - v;      /* panel: 1 = previous, 2 = next */
+    key_forward(v);
+    return rc;
+}
+static int key_hook_mfl(void* self, void* msg) { return key_hook(0, self, msg); }
+static int key_hook_panel(void* self, void* msg) { return key_hook(1, self, msg); }
+static void keys_install() {
+    if (g_keys_tried) return;
+    g_keys_tried = 1;
+    void* self = dlopen(0, 2);
+    for (int k = 0; k < 2; ++k) {
+        KeyHook& h = g_kh[k];
+        unsigned long* vt = self ? (unsigned long*)dlsym(self, h.vtable) : 0;
+        unsigned long* slot = vt ? vt + 8 : 0;             /* vtable symbol + 32 bytes */
+        const unsigned long* g = (const unsigned long*)h.getter;
+        int ok = slot && *slot == h.orig && g[0] == kKeyGetterSig[0] && g[1] == kKeyGetterSig[1] && g[2] == kKeyGetterSig[2];
+        if (ok) { h.slot = slot; *slot = (unsigned long)h.hook; }   /* one aligned store */
+        alog_val(k ? "keys panel hook" : "keys mfl hook", ok ? 1 : slot ? (int)*slot : 0);
+    }
+}
+static void keys_restore() {
+    for (int k = 0; k < 2; ++k) if (g_kh[k].slot) { *g_kh[k].slot = g_kh[k].orig; g_kh[k].slot = 0; }
+}
+
 extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
                             const bmw::Bundle& dependencies, const bmw::Bundle& parameters) {
     if (!name || !*name) return 0;
@@ -1137,6 +1213,7 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
 
 extern "C" void aap_destroy(void* app) {
     if (!app) return;
+    keys_restore();
     auto_runtime_shutdown();
     if (g_iba_target_live && pthread_self() == g_iba_tid) {
         typedef void (*Dtor)(void*); ((Dtor)0x08d6ed6cUL)(g_iba_target); g_iba_target_live = 0;
