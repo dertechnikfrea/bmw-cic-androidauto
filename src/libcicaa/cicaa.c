@@ -115,7 +115,9 @@ static void *worker(void *arg)
     }
     pki.crt = crt; pki.crt_len = cn; pki.key = key; pki.key_len = kn; pki.origin = "hu.crt/hu.key";
     st("Waiting for phone on USB...");
-    if (aa_usb_open(lg, st, 120, &t) != 0) {
+    /* 30 s instead of 120 s: a Connect without phone used to stay armed for two minutes
+       and then connected by surprise when the phone was plugged in later. */
+    if (aa_usb_open(lg, st, 30, &t) != 0) {
         snprintf(g_result, sizeof g_result, "no Android Auto phone detected");
         st("No phone");
     } else {

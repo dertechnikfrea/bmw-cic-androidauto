@@ -250,10 +250,11 @@ static int send_sd_response(aa_t *a)
 {
     pb_t sd, ch, sub, cfg, item;
     memset(&sd, 0, sizeof sd);
-    /* channel 2: sensors DRIVING_STATUS(13) + NIGHT_DATA(10) */
+    /* channel 2: sensor DRIVING_STATUS(13). NIGHT_DATA(10) is no longer announced: 1.0
+       always reported "day", which overrides the phone's automatic day/night. Without the
+       sensor the phone follows its own setting (automatic = by sunset). */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 13); pb_msg(&sub, 1, &item);
-    memset(&item, 0, sizeof item); pb_u(&item, 1, 10); pb_msg(&sub, 1, &item);
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
     /* channel 3: video H.264 800x480 (UI area 720x360, see aap_paths.h), 30 fps (v19), dpi 140 */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
@@ -300,11 +301,7 @@ static void send_sensor_events(aa_t *a)
     pb_u(&s, 1, 0);                    /* driving status UNRESTRICTED (parked) */
     pb_msg(&ev, 13, &s);
     send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
-    memset(&ev, 0, sizeof ev); memset(&s, 0, sizeof s);
-    pb_u(&s, 1, 0);                    /* is_night = false */
-    pb_msg(&ev, 10, &s);
-    send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
-    a->lg("AA tx sensor events (driving=parked, night=false)");
+    a->lg("AA tx sensor event (driving=parked)");
 }
 
 static int on_video(aa_t *a, int id, const unsigned char *p, size_t n)
