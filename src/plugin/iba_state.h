@@ -4,6 +4,11 @@
  * (-init cic_loaded only): keep the flag zero-initialised (.bss), 0 = DVD/cicdsp
  * (v30 default), 1 = IBA AuxIn SelectVideoFile (firmware builds the graph). */
 static int g_iba_file_mode;
+/* 0 = BT Audio (default): audio connection C4 is released again as soon as the video
+ * is shown, so the CIC's own source (Bluetooth music, radio...) plays on.
+ * 1 = AA Audio: C4 stays connected (AA audio over USB -> DSP -> speakers).
+ * Set by the plugin from aaaudio.on before a display start. */
+static int g_iba_keep_audio;
 /* 0=DSP MP4, 1=AuxIn IBA, 2=DMB in the isolated helper. */
 #define IBA_DVD_MODE (g_iba_file_mode!=1)
 #define IBA_DMB_MODE (g_iba_file_mode==2)
@@ -59,6 +64,10 @@ struct IbaState {
   if(!sent[IBA_CONNECT])return IBA_CONNECT;
   if(!sent[IBA_START])return IBA_START;
   if(!sent[IBA_SHOW])return IBA_SHOW;
+  /* BT Audio: give C4 back right after the start (the request itself is kept: the
+     start sequence was only ever tested with it; it interrupts the CIC source for
+     about a second). */
+  if(!g_iba_keep_audio&&!sent[IBA_RELEASE])return IBA_RELEASE;
   return IBA_PLAYING;
  }
  int issue(IbaOp op,unsigned handle,long now) {

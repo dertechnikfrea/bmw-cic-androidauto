@@ -10,6 +10,7 @@
 #define AAP_LOGDIR    AAP_DIR "/logs"               /* log files (only when enabled) */
 #define AAP_ZOOM_ON   AAP_DIR "/zoom.on"            /* screen mode Fullscreen (Zoom Mode button) */
 #define AAP_WIDE_ON   AAP_DIR "/wide.on"            /* screen mode Stretched */
+#define AAP_AAUDIO_ON AAP_DIR "/aaaudio.on"         /* exists = AA audio over USB; missing = BT audio */
 #define AAP_LIB       AAP_DIR "/libcicaa.so"
 #define AAP_LIVE      AAP_DIR "/cicaalive"
 #define AAP_DSPLOAD   AAP_DIR "/dspload"

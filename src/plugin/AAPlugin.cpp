@@ -1,6 +1,7 @@
 /* AAPlugin: Android Auto for the BMW CIC HIGH (QNX 6.3.2, SH4, HmiMain 9283417A).
  *
- * One HMI page: [Connect] [Disconnect] [Zoom Mode] [Logging] + one status line "Screen: ...".
+ * One HMI page: [Connect] [Disconnect] [Zoom Mode] [Switch Audio] [Logging] + one status
+ * line "Screen: ...".
  *
  *  Connect  -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
  *           -> patched DM642 DSP image is linked in RAM (dspload on) once per boot.
@@ -11,6 +12,8 @@
  *              to the phone. MENU leaves AA (it keeps running); pressing
  *              Connect again brings it back. The AA "exit" icon also leaves.
  *  Disconnect -> ends the AA session on the phone too (ByeByeRequest).
+ *  Switch Audio -> BT Audio (default: phone music over Bluetooth, CIC source kept) or
+ *              AA Audio (all AA audio over USB -> DSP); takes effect at the next Connect.
  *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
  *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
@@ -106,6 +109,7 @@ typedef char delegate_must_be_two_words[sizeof(Handler) == 8 ? 1 : -1];
 enum {
     ACTION_BACK_MAIN = 3,          /* hmiAction -> page 10 */
     ACTION_CONNECT = 181, ACTION_ZOOM = 185, ACTION_LOGS = 204, ACTION_DISCONNECT = 187,
+    ACTION_AUDIO = 189,
     MODEL_STATUS = 182,            /* connection status text (kept, no label on the page) */
     MODEL_SCREEN = 186,            /* "Screen: <mode>[ | Logs ON]" line */
     PAGE_MAIN = 10, PAGE_MAIN_FIRST = 11,
@@ -967,13 +971,17 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     ui(app, MODEL_STATUS, "Connect the phone via USB...");
     return true;
 }
-/* The one status line of the page: "Screen: Normal[ | Logs ON]". Refreshed when the page
- * opens (also via a programmed favourite button) and after every button press. */
+/* The one status line of the page: "Screen: Normal | BT Audio" (" | Logs ON" instead of
+ * the audio mode while logging). Refreshed when the page opens (also via a programmed
+ * favourite button), on Connect and after every button press. It also re-reads the
+ * audio mode for the next display start. */
 static void status_line(bmw::PluginApp* app) {
     static const char* const kMode[3] = {"Normal", "Fullscreen", "Stretched"};
+    g_iba_keep_audio = file_exists(AAP_AAUDIO_ON);
     char b[96]; unsigned n = put_str(b, 0, "Screen: ");
     n = put_str(b, n, kMode[screen_mode()]);
     if (g_logs) n = put_str(b, n, " | Logs ON");
+    else n = put_str(b, n, g_iba_keep_audio ? " | AA Audio" : " | BT Audio");
     b[n] = 0;
     ui(app, MODEL_SCREEN, b);
 }
@@ -984,6 +992,15 @@ static bool onPageFocus(void* obj, const KeyMap&) { status_line(static_cast<bmw:
 static bool onDisconnect(void*, const bmw::Parcel&) {
     if (g_aa_busy && g_aa_busy() && g_aa_input) { g_aa_input(CICAA_IN_BYEBYE, 0, 0); alog("Disconnect pressed"); }
     return true;
+}
+/* Switch Audio: BT Audio <-> AA Audio (aaaudio.on). The media channel is only announced
+ * at service discovery, so a running session is ended (like Disconnect); the next
+ * Connect uses the new mode. */
+static bool onSwitchAudio(void* obj, const bmw::Parcel& p) {
+    if (file_exists(AAP_AAUDIO_ON)) unlink(AAP_AAUDIO_ON);
+    else { int f = open(AAP_AAUDIO_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+    status_line(static_cast<bmw::PluginApp*>(obj));
+    return onDisconnect(obj, p);
 }
 static bool onZoom(void* obj, const bmw::Parcel&) {
     screen_mode_next();
@@ -1011,6 +1028,7 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     add(app, ACTION_CONNECT, &onConnect);
     add(app, ACTION_DISCONNECT, &onDisconnect);
     add(app, ACTION_ZOOM, &onZoom);
+    add(app, ACTION_AUDIO, &onSwitchAudio);
     add(app, ACTION_LOGS, &onLogs);
     KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus}, page = {app, &onPageFocus};
     app->addHandlerWithMap(AA_KEYS, keys);

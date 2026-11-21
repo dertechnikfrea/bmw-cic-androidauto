@@ -289,7 +289,7 @@ static int send_sd_response(aa_t *a)
         a->lg("AA SERVICE_DISCOVERY_RESPONSE send failed");return -1;
     }
     a->lg("AA tx SERVICE_DISCOVERY_RESPONSE %u bytes (input/sensor/video + %s%sspeech/system + mic descriptor; capture unavailable)", (unsigned)sd.n, g_usb_media ? (g_aac ? "AAC-LC media(v56)/" : "PCM media/") : "", "PCM ");
-    a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (usb_media.off): phone uses Bluetooth A2DP");
+    a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (BT Audio mode): phone uses Bluetooth A2DP");
     return 0;
 }
 

@@ -6,6 +6,7 @@
       <raAction id="181" />
       <raAction id="185" />
       <raAction id="187" />
+      <raAction id="189" />
       <hmiAction id="203" target="210" />
       <raAction id="211" />
       <raAction id="204" />
@@ -20,6 +21,7 @@
           <button id="11" action="181" text="Connect" />
           <button id="15" action="187" text="Disconnect" />
           <button id="12" action="185" text="Zoom Mode" />
+          <button id="16" action="189" text="Switch Audio" />
           <button id="14" action="204" text="Logging" />
           <label id="13" text="Screen: " model="186" />
         </components>
