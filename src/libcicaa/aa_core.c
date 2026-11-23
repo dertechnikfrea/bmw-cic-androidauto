@@ -246,9 +246,61 @@ static unsigned long long mono_us(void)
     return (unsigned long long)t.tv_sec * 1000000ULL + (unsigned long long)t.tv_nsec / 1000ULL;
 }
 static void input_drain(aa_t *a);
+/* Optional settings (AAP_VIDEO_TXT, AAP_DRIVER_TXT), read at every connection. */
+static int read_small(const char *path, char *b, int size)
+{
+    int n, fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    n = read(fd, b, size - 1); close(fd);
+    if (n < 0) n = 0;
+    b[n] = 0; return n;
+}
+/* video.txt: "margin_w margin_h [dpi]". The phone draws its UI in
+ * (800 - margin_w) x (480 - margin_h); a different shape needs a matching geom.txt.
+ * Example for a full 1280x480 screen with the right proportions on a CIC whose video
+ * scaler only takes ~600 px wide sources (E60): video.txt "200 256 96" and
+ * geom.txt "100 128 600 224 0 0 1280 480".
+ * Margins above 600 x 320 (UI smaller than 200 x 160) or dpi outside 60..400 are
+ * ignored and the defaults kept. Returns 1 when video.txt set the margins. */
+static int video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
+{
+    char b[64]; unsigned v[3]; int k = 0; const char *p = b;
+    *mw = AAP_MARGIN_W; *mh = AAP_MARGIN_H; *dpi = AAP_DPI;
+    if (!read_small(AAP_VIDEO_TXT, b, sizeof b)) return 0;
+    while (*p && k < 3) {
+        while (*p && (*p < '0' || *p > '9')) ++p;
+        if (!*p) break;
+        v[k] = 0;
+        while (*p >= '0' && *p <= '9') { if (v[k] < 100000) v[k] = v[k] * 10 + (unsigned)(*p - '0'); ++p; }
+        ++k;
+    }
+    if (k >= 3 && v[2] >= 60 && v[2] <= 400) *dpi = v[2];
+    if (k >= 2 && v[0] <= 600 && v[1] <= 320) { *mw = v[0]; *mh = v[1]; return 1; }
+    return 0;
+}
+/* gps.txt: "off" = do not announce LOCATION and do not forward the CIC position
+ * (the phone then uses its own GPS). Read at each connection. */
+static int g_gps_off;
+static int gps_off(void)
+{
+    char b[16]; const char *p = b;
+    if (!read_small(AAP_GPS_TXT, b, sizeof b)) return 0;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    return (p[0] == 'o' || p[0] == 'O') && (p[1] == 'f' || p[1] == 'F');
+}
+/* driver.txt: "right" for right-hand drive; anything else (or no file) = left. */
+static int driver_right(void)
+{
+    char b[16]; const char *p = b;
+    if (!read_small(AAP_DRIVER_TXT, b, sizeof b)) return 0;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    return *p == 'r' || *p == 'R';
+}
 static int send_sd_response(aa_t *a)
 {
     pb_t sd, ch, sub, cfg, item;
+    unsigned mw, mh, dpi; int vfile, rhd = driver_right();
+    g_gps_off = gps_off();
     memset(&sd, 0, sizeof sd);
     /* channel 2: sensor DRIVING_STATUS(13). NIGHT_DATA(10) is no longer announced: 1.0
        always reported "day", which overrides the phone's automatic day/night. Without the
@@ -258,18 +310,22 @@ static int send_sd_response(aa_t *a)
     /* LOCATION(1): the CIC's own position (dead reckoning with wheel/gyro sensors, so it
        stays good in tunnels, car parks and street canyons) is forwarded from the plugin,
        see input_drain(). The phone uses it for navigation instead of its own GPS. */
-    memset(&item, 0, sizeof item); pb_u(&item, 1, 1); pb_msg(&sub, 1, &item);
+    if (!g_gps_off) { memset(&item, 0, sizeof item); pb_u(&item, 1, 1); pb_msg(&sub, 1, &item); }
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
-    /* channel 3: video H.264 800x480 (UI area 720x360, see aap_paths.h), 30 fps (v19), dpi 140 */
+    /* channel 3: video H.264 800x480, 30 fps (v19). Default: UI area 720x360 in the
+       top-left corner (see aap_paths.h). video.txt overrides margins/dpi; then the UI is
+       centred by the phone (no ui_config) and geom.txt must match. */
+    vfile = video_cfg(&mw, &mh, &dpi);
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
     /* v19: field 2 frame_rate 2 = 30 fps (1 = 60 fps, what v13-v18 requested). */
-    /* v47: margin_width (default 80, file margin_w.txt overrides): DSP shows only 720 px. */
-    pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, AAP_MARGIN_W); pb_u(&cfg, 4, AAP_MARGIN_H); pb_u(&cfg, 5, 140);
+    pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, mw); pb_u(&cfg, 4, mh); pb_u(&cfg, 5, dpi);
     /* VideoConfiguration field 11 ui_config { 1 margins { 2 bottom, 4 right } }: AA puts
-       its UI area (720x360) in the top-left corner instead of centring it. */
-    {   pb_t ins, ui; memset(&ins, 0, sizeof ins); memset(&ui, 0, sizeof ui);
+       its UI area in the top-left corner instead of centring it. */
+    if (!vfile) {
+        pb_t ins, ui; memset(&ins, 0, sizeof ins); memset(&ui, 0, sizeof ui);
         pb_u(&ins, 2, AAP_UI_MARGIN_BOTTOM); pb_u(&ins, 4, AAP_UI_MARGIN_RIGHT);
-        pb_msg(&ui, 1, &ins); pb_msg(&cfg, 11, &ui); }
+        pb_msg(&ui, 1, &ins); pb_msg(&cfg, 11, &ui);
+    }
     pb_u(&sub, 1, 3 /* VIDEO */); pb_msg(&sub, 4, &cfg); pb_u(&sub, 5, 1);
     pb_u(&ch, 1, CH_VIDEO); pb_msg(&ch, 3, &sub); pb_msg(&sd, 1, &ch);
     /* channel 1: input - rotary/DPAD keycodes, touch 800x480 */
@@ -283,7 +339,9 @@ static int send_sd_response(aa_t *a)
     pb_str(&sd, 3, "BMW CIC");        /* car_model */
     pb_str(&sd, 4, "2010");           /* car_year */
     pb_str(&sd, 5, "0000000001");     /* car_serial */
-    pb_u(&sd, 6, 1);                  /* left_hand_drive */
+    /* driver_position (current AA protocol): 0 = left, 1 = right. Phones read the old
+     * value 1 ("left_hand_drive = true") as RIGHT and put the rail on the wrong side. */
+    pb_u(&sd, 6, rhd ? 1 : 0);
     pb_str(&sd, 7, "CIC lab");        /* headunit_manufacturer */
     pb_str(&sd, 8, "CIC HIGH");       /* headunit_model */
     pb_str(&sd, 9, "1");              /* sw_build */
@@ -294,6 +352,7 @@ static int send_sd_response(aa_t *a)
         a->lg("AA SERVICE_DISCOVERY_RESPONSE send failed");return -1;
     }
     a->lg("AA tx SERVICE_DISCOVERY_RESPONSE %u bytes (input/sensor/video + %s%sspeech/system + mic descriptor; capture unavailable)", (unsigned)sd.n, g_usb_media ? (g_aac ? "AAC-LC media(v56)/" : "PCM media/") : "", "PCM ");
+    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s, %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left", vfile ? "video.txt (centred)" : "built-in (top-left)");
     a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (BT Audio mode): phone uses Bluetooth A2DP");
     return 0;
 }
@@ -384,7 +443,7 @@ static void input_drain(aa_t *a)
             static unsigned gps_sent;
             int lat_e7 = (int)(((long long)code * 1800000000LL) >> 31);
             int lon_e7 = (int)(((long long)val * 1800000000LL) >> 31);
-            if (!a->vframes) continue;
+            if (!a->vframes || g_gps_off) continue;
             memset(&ev, 0, sizeof ev); memset(&item, 0, sizeof item);
             ts = mono_us();
             pb_u(&item, 1, (unsigned long)(ts & 0xffffffffUL));

@@ -32,6 +32,7 @@
  * distorted on the 1280x480 (wide pixel) CIC display. */
 #define AAP_MARGIN_W  80
 #define AAP_MARGIN_H  120
+#define AAP_DPI       140
 #define AAP_UI_MARGIN_BOTTOM 120
 #define AAP_UI_MARGIN_RIGHT  80
 /* sx sy sw sh (crop in the 800x480 stream), dx dy dw dh (on the 1280x480 display).
@@ -48,4 +49,8 @@
 #define CICAA_IN_REL      2   /* rotary: code 65536, value = signed steps */
 #define CICAA_IN_BYEBYE   7   /* Disconnect button: end the AA session properly */
 #define CICAA_IN_LOCATION 9   /* code = latitude, value = longitude, CIC units (2^32 = 360 deg) */
+#define AAP_GEOM_TXT  AAP_DIR "/geom.txt"           /* "sx sy sw sh dx dy dw dh": overrides the built-in geometry */
+#define AAP_VIDEO_TXT AAP_DIR "/video.txt"          /* "margin_w margin_h [dpi]" asked from the phone */
+#define AAP_DRIVER_TXT AAP_DIR "/driver.txt"        /* "left" (default) or "right": driver seat */
+#define AAP_GPS_TXT   AAP_DIR "/gps.txt"            /* "off": do not send the CIC position to the phone */
 #endif
