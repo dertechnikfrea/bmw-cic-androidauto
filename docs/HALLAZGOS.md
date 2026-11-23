@@ -59,6 +59,11 @@ corchetes, el commit. Los apartados marcados *(PR #4)* están en la rama
   región, data/vtables −0x116c [3e34983].
 - Rev 76617 `CIC_L6_1107 B1107-501-1123S Build 46` (F30): text +0xa0/+0xbc/+0x3fc/+0x408 por región,
   data/vtables +0x7dc; 54 direcciones, 2 SigFix [ef34a1b, d210413].
+- C16A `CIC_L6_1103_Release B1103-500-1048A Build 43`, Rev 50823 (E9x LCI, SHA256 `0195a336…`): otra
+  versión de software, no un simple desplazamiento: text −0x6d64..−0x295d8 por bloques, data/vtables
+  −0x406dc..−0x40c70; 58 direcciones, 3 SigFix (2 por literales, 1 por la función de rol `0x08d6ebbc`,
+  cuyo código es distinto). Mapeado a mano: `hmi_profile.py` no encuentra la función cambiada.
+  Direcciones probadas en coche con binarios parcheados; el build desde fuente está sin probar.
 - Firmware desconocido → no toca nada ("HmiMain distinto").
 - **Cómo sacar HmiMain**: no es fichero en el CIC; está en la 2ª boot image
   (`memifs2 -o 0x00740000` en `/etc/starter.cfg`). Copia raw solo lectura: `cp /dev/fs0 /fs/usb0/fs0.img`

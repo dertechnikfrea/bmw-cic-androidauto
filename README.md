@@ -24,11 +24,14 @@ Known issues: occasional short audio cuts or video freezes when the DSP is at 10
 
 ## Compatibility
 
-* **Only CIC HIGH with CIC software version C1A.** The plugin calls internal HmiMain
+* **Only CIC HIGH with CIC software version C1A or C16A.** The plugin calls internal HmiMain
   functions at fixed addresses; before using them it compares their code against
   signatures. Known HmiMain builds (`src/plugin/iba_profiles.h`):
   * 9283417A, tested on an E9x (the addresses in the source are for this build);
-  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, tested on an E60 LCI.
+  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, tested on an E60 LCI;
+  * `CIC_L6_1103_Release B1103-500-1048A Build 43` (CIC software C16A, E9x LCI): these
+    addresses were tested in the car with patched binaries; the profile built from
+    source is not tested yet.
 
   If your HmiMain is another build, the plugin touches nothing and shows
   "HmiMain distinto: no compatible"; see [Other HmiMain builds](#other-hmimain-builds).
@@ -231,6 +234,12 @@ To support one:
 
 At run time the plugin uses the first profile whose fingerprints all match; with
 logs ON, `plugin.log` shows `HmiMain profile ...`.
+
+Another CIC software version is more than a shift. In C16A the code moved in blocks
+by different amounts (27 KB to 165 KB) and one of the 47 functions has different
+code, so its fingerprint is not in that HmiMain and `hmi_profile.py` cannot build the
+table. The C16A profile was mapped by hand; its `SigFix` table holds the bytes of that
+function in C16A.
 
 ## License
 
