@@ -26,6 +26,10 @@ Method:
   * data addresses (vtables, one static) are moved by the data shift measured on
     the masked literal words, and every vtable is checked through its C++ typeinfo
     name.
+  * the skip-key hooks (KeyHook in AAPlugin.cpp) are taken from their vtable symbol
+    (slot 8 = handler) in the dynamic symbols; the getter moves with the handler and
+    must match kKeyGetterSig. If that fails only a warning is printed: the plugin
+    keeps those hooks off on that build.
 Anything that cannot be resolved unambiguously is reported and the profile is
 not printed.
 """
@@ -84,6 +88,35 @@ class Image:
     def in_text(self, va):
         return self.text[0] <= va < self.text[0] + self.text[2]
 
+    def dynsym(self):
+        """{name: value} of the dynamic symbol table (found through PT_DYNAMIC)."""
+        phoff, = struct.unpack_from("<I", self.d, 28)
+        phentsize, phnum = struct.unpack_from("<HH", self.d, 42)
+        dyn = None
+        for i in range(phnum):
+            p_type, off, _, _, filesz = struct.unpack_from("<5I", self.d, phoff + i * phentsize)
+            if p_type == 2:
+                dyn = (off, filesz)
+        if dyn is None:
+            return {}
+        tags = {}
+        for j in range(dyn[1] // 8):
+            tag, val = struct.unpack_from("<iI", self.d, dyn[0] + j * 8)
+            if tag == 0:
+                break
+            tags.setdefault(tag, val)
+        if not all(t in tags for t in (4, 5, 6)):        # DT_HASH, DT_STRTAB, DT_SYMTAB
+            return {}
+        nchain = self.word(tags[4] + 4)
+        out = {}
+        for i in range(nchain):
+            o = self.off(tags[6] + i * 16)
+            st_name, st_value = struct.unpack_from("<II", self.d, o)
+            n = self.cstr(tags[5] + st_name, 256)
+            if n:
+                out[n] = st_value
+        return out
+
 
 def is_addr(w):
     return 0x08000000 <= w < 0x0A000000
@@ -100,6 +133,40 @@ def plugin_inputs():
     used |= set(int(x, 16) for x in re.findall(r"=0x([0-9a-fA-F]+)UL;", hdr))
     used -= {0x08000000, 0x09000000, 0x0A000000}
     return sigs, used
+
+
+def key_hooks():
+    """KeyHook entries of AAPlugin.cpp: (vtable symbol, handler, getter) + getter signature."""
+    src = (PLUGIN / "AAPlugin.cpp").read_text()
+    hooks = [(m.group(1), int(m.group(2), 16), int(m.group(3), 16)) for m in
+             re.finditer(r'\{"(_ZTV\w+)",\s*0x([0-9a-fA-F]+)UL,\s*0x([0-9a-fA-F]+)UL', src)]
+    m = re.search(r"kKeyGetterSig\[\d*\]\s*=\s*\{([^}]*)\}", src)
+    sig = [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]+)", m.group(1))] if m else []
+    return hooks, sig
+
+
+KEY_SLOT = 8    # vtable[8] = message handler (see KeyHook in AAPlugin.cpp)
+
+
+def resolve_key_hooks(img, hooks, sig):
+    """Handler = vtable symbol slot 8 in the new build; getter moves with it and must
+    match the getter signature. Returns ({old: new}, notes, errors)."""
+    syms = img.dynsym() if hooks else {}
+    xlat, notes, errors = {}, {}, []
+    for name, handler, getter in hooks:
+        vt = syms.get(name)
+        if vt is None:
+            errors.append("vtable %s not in the dynamic symbols" % name); continue
+        new_h = img.word(vt + 4 * KEY_SLOT)
+        if new_h is None or not img.in_text(new_h):
+            errors.append("vtable %s slot %d is not code" % (name, KEY_SLOT)); continue
+        new_g = getter + (new_h - handler)
+        if [img.word(new_g + 4 * k) for k in range(len(sig))] != sig:
+            errors.append("getter of %s at %#x does not match kKeyGetterSig" % (name, new_g)); continue
+        short = name[4:-1] if name.endswith("E") else name
+        xlat[handler], notes[handler] = new_h, "key handler, %s slot %d" % (short, KEY_SLOT)
+        xlat[getter], notes[getter] = new_g, "key getter, moves with the handler (signature checked)"
+    return xlat, notes, errors
 
 
 # ---------------------------------------------------------------- search
@@ -232,8 +299,13 @@ def main(argv):
 
     dshift = data_shift(img, sigs, masks, tmap)
     xlat = dict(tmap)
-    notes = {}
-    for a in sorted(used - set(tmap)):
+    hooks, getter_sig = key_hooks()
+    kx, notes, kerr = resolve_key_hooks(img, hooks, getter_sig)
+    for e in kerr:    # optional feature: the plugin's own checks keep the hook off
+        print("WARNING %s: skip keys stay off on this build" % e, file=sys.stderr)
+    xlat.update(kx)
+    skip = set(tmap) | {a for _, h, g in hooks for a in (h, g)}
+    for a in sorted(used - skip):
         if a >= img.data_seg[0] - 0x00100000 and a >= 0x09000000:
             if dshift is None:
                 print("ERROR no data shift for %#x" % a, file=sys.stderr); ok = False; continue
