@@ -174,17 +174,21 @@ Put any of these files in the root of the install stick: the installer copies th
 to `/mnt/hbdebug/aap/` (no reboot; used from the next AA start). A file whose first
 word is `default` removes that setting. The plugin itself never creates them.
 
-* `geom.txt`: `sx sy sw sh dx dy dw dh`, video crop and on-screen rectangle.
-  Default `80 80 640 320 160 0 960 480`; `80 80 640 320 0 0 1280 480` stretches it
-  to the full width.
+* `geom.txt`: `sx sy sw sh dx dy dw dh`, video crop and on-screen rectangle. When
+  present it replaces the built-in geometry of the Zoom Mode button (Normal
+  `0 0 720 360 256 0 960 480`, Fullscreen `0 0 720 360 0 0 960 480`, Stretched
+  `0 0 720 360 0 0 1280 480`).
 * `keymap.txt`: lines `cic_key android_key` (e.g. `12 22`).
-* `video.txt`: `margin_w margin_h [dpi]` asked from the phone (default `160 160 140`).
+* `video.txt`: `margin_w margin_h [dpi]` asked from the phone (default `80 120 140`).
   Android Auto draws its UI in a (800 - margin_w) x (480 - margin_h) area of the
-  800x480 stream; change `geom.txt` to match. Lower dpi = smaller UI, more fits.
+  800x480 stream. Without `video.txt` that area sits in the top-left corner; with it
+  the phone centres it, so change `geom.txt` to match. Lower dpi = smaller UI, more fits.
   Margins above `600 320` or dpi outside 60-400 are ignored (defaults kept).
 * `driver.txt`: `right` for right-hand drive (the Android Auto rail goes to the right);
   default left.
-* `vlead_ms.txt`: video lead in ms (default 300; higher = fewer freezes, more latency).
+* `gps.txt`: `off` stops sending the CIC position to the phone (it then uses its own
+  GPS). Default on: navigation follows the car's dead-reckoning position.
+* `vlead_ms.txt`: video lead in ms (default 50; higher = fewer freezes, more latency).
   **Experimental:** `nopts` or `pts-1` sends video without timestamps once the DSP clock
   runs, so each frame is shown as soon as it is decoded (lowest latency, never skipped).
   Tuning from car tests: 150 ms stalls more (the DSP drops frames, `avSync: skip frame`,
@@ -195,12 +199,13 @@ word is `default` removes that setting. The plugin itself never creates them.
 
 ### Full screen with the right proportions
 
-The CIC screen is 1280x480 (8:3) but the default AA area is 640x320 (2:1), shown
-960x480 centred. To fill the screen without stretching, ask the phone for an 8:3
+The CIC screen is 1280x480 (8:3) but the default AA area is 720x360 (2:1), shown
+960x480. To fill the screen without stretching, ask the phone for an 8:3
 area and scale it up. On an E60 LCI the CIC video scaler only accepts a source up to
 about 600 px wide (640 is cut off on the right; 600 and below fill the screen), so:
 
 * `video.txt`: `200 256 96` (600x224 area; dpi 96 so the AA rail and cards fit);
+  With `video.txt` the phone centres its UI area, so `geom.txt` must crop it;
 * `geom.txt`: `100 128 600 224 0 0 1280 480`.
 
 It is softer (about 2.1x upscale) and lists show fewer rows, but it is edge to edge

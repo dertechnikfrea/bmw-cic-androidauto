@@ -177,18 +177,22 @@ siguiente arranque de AA). Un fichero cuya primera palabra sea `default` borra e
 ajuste. El plugin nunca los crea.
 
 * `geom.txt`: `sx sy sw sh dx dy dw dh`, recorte del vídeo y rectángulo en
-  pantalla. Por defecto `80 80 640 320 160 0 960 480`. Por ejemplo,
-  `80 80 640 320 0 0 1280 480` lo estira a todo el ancho.
+  pantalla. Si existe, sustituye la geometría integrada del botón Zoom Mode (Normal
+  `0 0 720 360 256 0 960 480`, Fullscreen `0 0 720 360 0 0 960 480`, Stretched
+  `0 0 720 360 0 0 1280 480`).
 * `keymap.txt`: líneas `tecla_cic tecla_android` (p. ej. `12 22`).
 * `video.txt`: `margen_ancho margen_alto [dpi]` que se piden al móvil (por defecto
-  `160 160 140`). Android Auto dibuja su interfaz en un área de
-  (800 - margen_ancho) x (480 - margen_alto) del vídeo de 800x480; ajusta `geom.txt`
-  a juego. Menos dpi = interfaz más pequeña, cabe más.
+  `80 120 140`). Android Auto dibuja su interfaz en un área de
+  (800 - margen_ancho) x (480 - margen_alto) del vídeo de 800x480. Sin `video.txt`
+  esa área va en la esquina superior izquierda; con él el móvil la centra, así que
+  ajusta `geom.txt` a juego. Menos dpi = interfaz más pequeña, cabe más.
   Márgenes mayores que `600 320` o dpi fuera de 60-400 se ignoran (quedan los valores
   por defecto).
 * `driver.txt`: `right` para volante a la derecha (la barra de Android Auto pasa a la
   derecha); por defecto izquierda.
-* `vlead_ms.txt`: margen de vídeo en ms (por defecto 300; más alto, menos cortes
+* `gps.txt`: `off` deja de mandar la posición del CIC al móvil (usa su propio GPS).
+  Por defecto activado: la navegación sigue la posición del coche (navegación a estima).
+* `vlead_ms.txt`: margen de vídeo en ms (por defecto 50; más alto, menos cortes
   y más retraso). **Experimental:** `nopts` o `pts-1` manda el vídeo sin marca de
   tiempo cuando el reloj del DSP ya corre: cada frame se muestra en cuanto se
   decodifica (mínimo retraso, nunca se descarta).
@@ -201,14 +205,15 @@ ajuste. El plugin nunca los crea.
 
 ### Pantalla completa con las proporciones correctas
 
-La pantalla del CIC es de 1280x480 (8:3) pero el área de AA por defecto es de 640x320
-(2:1), mostrada a 960x480 centrada. Para llenar la pantalla sin estirar, se pide al
+La pantalla del CIC es de 1280x480 (8:3) pero el área de AA por defecto es de 720x360
+(2:1), mostrada a 960x480. Para llenar la pantalla sin estirar, se pide al
 móvil un área 8:3 y se amplía. En un E60 LCI el escalador de vídeo del CIC solo acepta
 un origen de hasta unos 600 px de ancho (640 se corta por la derecha; 600 o menos
 llenan la pantalla), así que:
 
 * `video.txt`: `200 256 96` (área de 600x224; dpi 96 para que quepan la barra y las
   tarjetas de AA);
+  Con `video.txt` el móvil centra su área, así que `geom.txt` debe recortarla;
 * `geom.txt`: `100 128 600 224 0 0 1280 480`.
 
 Se ve menos nítido (ampliación de unas 2,1 veces) y las listas muestran menos filas,

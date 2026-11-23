@@ -5,6 +5,8 @@
       <hmiAction id="3" target="10" />
       <raAction id="181" />
       <raAction id="185" />
+      <raAction id="187" />
+      <raAction id="189" />
       <hmiAction id="203" target="210" />
       <raAction id="211" />
       <raAction id="204" />
@@ -12,26 +14,22 @@
     <models>
       <raDataModel id="182" />
       <raDataModel id="186" />
+      <raDataRequestModel id="230" modelType="vehicle.location" />
     </models>
     <hmiStates>
       <hmiState id="10" text="Android Auto">
         <components>
-          <button id="11" action="181" text="Conectar Android Auto" />
-          <button id="12" action="185" text="Logs ON/OFF" />
-          <label id="13" text="Estado: " model="182" />
-          <label id="14" text="Logs: " model="186" />
+          <button id="11" action="181" text="Connect" />
+          <button id="15" action="187" text="Disconnect" />
+          <button id="12" action="185" text="Zoom Mode" />
+          <button id="16" action="189" text="Switch Audio" />
+          <button id="14" action="204" text="Logging" />
+          <label id="13" text="Screen: " model="186" />
         </components>
       </hmiState>
-      <terminalUI id="210" action="211" text="Android Auto">
+      <terminalUI id="210" action="211" text="Auto">
         <properties><property id="26" value="2,0,8" /></properties>
-        <components>
-          <label id="212" text="Android Auto" />
-        </components>
-        <toolbarComponents>
-          <button id="217" action="204" text="Volver">
-            <properties><property id="1" value="true" /><property id="22" value="true" /></properties>
-          </button>
-        </toolbarComponents>
+        <components />
       </terminalUI>
     </hmiStates>
     <events>

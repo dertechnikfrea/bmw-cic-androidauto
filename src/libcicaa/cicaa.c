@@ -27,7 +27,7 @@
 #include "cic_entropy.h"
 #include "aap_paths.h"
 
-static char g_status[128] = "sin iniciar";
+static char g_status[128] = "not started";
 static char g_result[192] = "";
 static volatile int g_busy = 0;
 static int g_logon = 0;
@@ -108,20 +108,22 @@ static void *worker(void *arg)
     key = slurp(AAP_DIR "/hu.key", &kn);
     if (!crt || !key) {
         free(crt); free(key);
-        snprintf(g_result, sizeof g_result, "falta hu.crt/hu.key (AAHU.CRT/AAHU.KEY en el USB al instalar)");
-        st("Falta certificado AA");
+        snprintf(g_result, sizeof g_result, "hu.crt/hu.key missing (put AAHU.CRT/AAHU.KEY on the USB stick and reinstall)");
+        st("AA certificate missing");
         g_busy = 0;
         return 0;
     }
     pki.crt = crt; pki.crt_len = cn; pki.key = key; pki.key_len = kn; pki.origin = "hu.crt/hu.key";
-    st("Esperando movil por USB...");
-    if (aa_usb_open(lg, st, 120, &t) != 0) {
-        snprintf(g_result, sizeof g_result, "no se detecto movil Android Auto");
-        st("Sin movil");
+    st("Waiting for phone on USB...");
+    /* 30 s instead of 120 s: a Connect without phone used to stay armed for two minutes
+       and then connected by surprise when the phone was plugged in later. */
+    if (aa_usb_open(lg, st, 30, &t) != 0) {
+        snprintf(g_result, sizeof g_result, "no Android Auto phone detected");
+        st("No phone");
     } else {
         stage = aa_session(&t, &pki, lg, st, sum, sizeof sum);
-        snprintf(g_result, sizeof g_result, "etapa %d/7: %s", stage, sum);
-        st(stage >= 7 ? "Sesion terminada" : "Sesion terminada con error");
+        snprintf(g_result, sizeof g_result, "stage %d/7: %s", stage, sum);
+        st(stage >= 7 ? "Session ended" : "Session ended with error");
     }
     aa_usb_close();
     free(crt); free(key);
@@ -137,13 +139,13 @@ int cicaa_start(void)
     if (g_busy) return 1;
     g_busy = 1;
     g_result[0] = 0;
-    snprintf(g_status, sizeof g_status, "arrancando...");
+    snprintf(g_status, sizeof g_status, "starting...");
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&a, 512 * 1024);
     if (pthread_create(&t, &a, worker, 0) != 0) {
         g_busy = 0;
-        snprintf(g_status, sizeof g_status, "error creando hilo");
+        snprintf(g_status, sizeof g_status, "error creating thread");
         return -1;
     }
     return 0;

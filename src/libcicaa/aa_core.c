@@ -160,7 +160,15 @@ static int read_msg(aa_t *a, int timeout_ms)
             size_t hdr = ((fl & F_COMPLETE) == F_FIRST) ? 8 : 4;
             if (a->rxn < hdr + sz) break;
             if (fl & F_ENC) {
-                if (!a->ssl) { a->lg("AA encrypted frame before TLS"); return -3; }
+                if (!a->ssl) {
+                    /* Connect again after Disconnect without re-plugging: the phone may
+                       still send encrypted frames of the old session. Drop them instead of
+                       failing the new session. */
+                    memmove(a->rx, a->rx + hdr + sz, a->rxn - hdr - sz);
+                    a->rxn -= hdr + sz;
+                    a->lg("V60 skipped stale encrypted frame before TLS");
+                    continue;
+                }
                 tin_push(a, a->rx + hdr, sz);
                 for (;;) {
                     int r = mbedtls_ssl_read(a->ssl, a->msg + a->msgn, sizeof a->msg - a->msgn);
@@ -253,12 +261,12 @@ static int read_small(const char *path, char *b, int size)
  * scaler only takes ~600 px wide sources (E60): video.txt "200 256 96" and
  * geom.txt "100 128 600 224 0 0 1280 480".
  * Margins above 600 x 320 (UI smaller than 200 x 160) or dpi outside 60..400 are
- * ignored and the defaults kept. */
-static void video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
+ * ignored and the defaults kept. Returns 1 when video.txt set the margins. */
+static int video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
 {
     char b[64]; unsigned v[3]; int k = 0; const char *p = b;
     *mw = AAP_MARGIN_W; *mh = AAP_MARGIN_H; *dpi = AAP_DPI;
-    if (!read_small(AAP_VIDEO_TXT, b, sizeof b)) return;
+    if (!read_small(AAP_VIDEO_TXT, b, sizeof b)) return 0;
     while (*p && k < 3) {
         while (*p && (*p < '0' || *p > '9')) ++p;
         if (!*p) break;
@@ -266,8 +274,19 @@ static void video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
         while (*p >= '0' && *p <= '9') { if (v[k] < 100000) v[k] = v[k] * 10 + (unsigned)(*p - '0'); ++p; }
         ++k;
     }
-    if (k >= 2 && v[0] <= 600 && v[1] <= 320) { *mw = v[0]; *mh = v[1]; }
     if (k >= 3 && v[2] >= 60 && v[2] <= 400) *dpi = v[2];
+    if (k >= 2 && v[0] <= 600 && v[1] <= 320) { *mw = v[0]; *mh = v[1]; return 1; }
+    return 0;
+}
+/* gps.txt: "off" = do not announce LOCATION and do not forward the CIC position
+ * (the phone then uses its own GPS). Read at each connection. */
+static int g_gps_off;
+static int gps_off(void)
+{
+    char b[16]; const char *p = b;
+    if (!read_small(AAP_GPS_TXT, b, sizeof b)) return 0;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    return (p[0] == 'o' || p[0] == 'O') && (p[1] == 'f' || p[1] == 'F');
 }
 /* driver.txt: "right" for right-hand drive; anything else (or no file) = left. */
 static int driver_right(void)
@@ -280,19 +299,33 @@ static int driver_right(void)
 static int send_sd_response(aa_t *a)
 {
     pb_t sd, ch, sub, cfg, item;
-    unsigned mw, mh, dpi; int rhd = driver_right();
+    unsigned mw, mh, dpi; int vfile, rhd = driver_right();
+    g_gps_off = gps_off();
     memset(&sd, 0, sizeof sd);
-    /* channel 2: sensors DRIVING_STATUS(13) + NIGHT_DATA(10) */
+    /* channel 2: sensor DRIVING_STATUS(13). NIGHT_DATA(10) is no longer announced: 1.0
+       always reported "day", which overrides the phone's automatic day/night. Without the
+       sensor the phone follows its own setting (automatic = by sunset). */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 13); pb_msg(&sub, 1, &item);
-    memset(&item, 0, sizeof item); pb_u(&item, 1, 10); pb_msg(&sub, 1, &item);
+    /* LOCATION(1): the CIC's own position (dead reckoning with wheel/gyro sensors, so it
+       stays good in tunnels, car parks and street canyons) is forwarded from the plugin,
+       see input_drain(). The phone uses it for navigation instead of its own GPS. */
+    if (!g_gps_off) { memset(&item, 0, sizeof item); pb_u(&item, 1, 1); pb_msg(&sub, 1, &item); }
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
-    /* channel 3: video H.264 800x480, 30 fps (v19), margins and dpi from video.txt */
-    video_cfg(&mw, &mh, &dpi);
+    /* channel 3: video H.264 800x480, 30 fps (v19). Default: UI area 720x360 in the
+       top-left corner (see aap_paths.h). video.txt overrides margins/dpi; then the UI is
+       centred by the phone (no ui_config) and geom.txt must match. */
+    vfile = video_cfg(&mw, &mh, &dpi);
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
     /* v19: field 2 frame_rate 2 = 30 fps (1 = 60 fps, what v13-v18 requested). */
-    /* margins/dpi: AAP_MARGIN_W/H and AAP_DPI by default, video.txt overrides (video_cfg). */
     pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, mw); pb_u(&cfg, 4, mh); pb_u(&cfg, 5, dpi);
+    /* VideoConfiguration field 11 ui_config { 1 margins { 2 bottom, 4 right } }: AA puts
+       its UI area in the top-left corner instead of centring it. */
+    if (!vfile) {
+        pb_t ins, ui; memset(&ins, 0, sizeof ins); memset(&ui, 0, sizeof ui);
+        pb_u(&ins, 2, AAP_UI_MARGIN_BOTTOM); pb_u(&ins, 4, AAP_UI_MARGIN_RIGHT);
+        pb_msg(&ui, 1, &ins); pb_msg(&cfg, 11, &ui);
+    }
     pb_u(&sub, 1, 3 /* VIDEO */); pb_msg(&sub, 4, &cfg); pb_u(&sub, 5, 1);
     pb_u(&ch, 1, CH_VIDEO); pb_msg(&ch, 3, &sub); pb_msg(&sd, 1, &ch);
     /* channel 1: input - rotary/DPAD keycodes, touch 800x480 */
@@ -319,8 +352,8 @@ static int send_sd_response(aa_t *a)
         a->lg("AA SERVICE_DISCOVERY_RESPONSE send failed");return -1;
     }
     a->lg("AA tx SERVICE_DISCOVERY_RESPONSE %u bytes (input/sensor/video + %s%sspeech/system + mic descriptor; capture unavailable)", (unsigned)sd.n, g_usb_media ? (g_aac ? "AAC-LC media(v56)/" : "PCM media/") : "", "PCM ");
-    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left");
-    a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (usb_media.off): phone uses Bluetooth A2DP");
+    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s, %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left", vfile ? "video.txt (centred)" : "built-in (top-left)");
+    a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (BT Audio mode): phone uses Bluetooth A2DP");
     return 0;
 }
 
@@ -331,11 +364,7 @@ static void send_sensor_events(aa_t *a)
     pb_u(&s, 1, 0);                    /* driving status UNRESTRICTED (parked) */
     pb_msg(&ev, 13, &s);
     send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
-    memset(&ev, 0, sizeof ev); memset(&s, 0, sizeof s);
-    pb_u(&s, 1, 0);                    /* is_night = false */
-    pb_msg(&ev, 10, &s);
-    send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
-    a->lg("AA tx sensor events (driving=parked, night=false)");
+    a->lg("AA tx sensor event (driving=parked)");
 }
 
 static int on_video(aa_t *a, int id, const unsigned char *p, size_t n)
@@ -393,20 +422,61 @@ static void input_drain(aa_t *a)
         if (g_inr == g_inw) { pthread_mutex_unlock(&g_inmu); break; }
         { unsigned i = g_inr++ % 32; kind = g_inq[i].kind; code = g_inq[i].code; val = g_inq[i].val; }
         pthread_mutex_unlock(&g_inmu);
+        if (kind == CICAA_IN_BYEBYE) {
+            /* Disconnect button: ByeByeRequest{1 reason = 1 USER_SELECTION} on the control
+               channel. The phone closes AA cleanly and answers SHUTDOWN_RESPONSE (0x10),
+               which ends the session (dispatch). Before, AA kept running on the phone
+               after the CIC side stopped. */
+            memset(&ev, 0, sizeof ev); pb_u(&ev, 1, 1);
+            send_msg(a, CH_CONTROL, 0, M_SHUTDOWN_REQ, ev.b, ev.n);
+            a->lg("V58 disconnect: SHUTDOWN_REQUEST sent");
+            continue;
+        }
+        if (kind == CICAA_IN_LOCATION) {
+            /* V61: CIC position from the plugin (RHMI data model vehicle.location, text
+               "lat,lon" in CIC units: 2^32 = 360 degrees) -> SensorEvent{1 LocationData{
+               1 timestamp, 2 latitude_e7, 3 longitude_e7, 4 accuracy_e3}} on the sensor
+               channel. e7 = raw * 360e7 / 2^32 = (raw * 1.8e9) >> 31. Accuracy is reported
+               as 10 m. Only sent once video runs (the session is fully up). The plugin
+               delivers about one position per second. Car test: AA navigation followed the
+               car smoothly, also in tunnels and an underground car park. */
+            static unsigned gps_sent;
+            int lat_e7 = (int)(((long long)code * 1800000000LL) >> 31);
+            int lon_e7 = (int)(((long long)val * 1800000000LL) >> 31);
+            if (!a->vframes || g_gps_off) continue;
+            memset(&ev, 0, sizeof ev); memset(&item, 0, sizeof item);
+            ts = mono_us();
+            pb_u(&item, 1, (unsigned long)(ts & 0xffffffffUL));
+            pb_s32(&item, 2, lat_e7); pb_s32(&item, 3, lon_e7); pb_u(&item, 4, 10000);
+            pb_msg(&ev, 1, &item);
+            send_msg(a, CH_SENSOR, 0, SENSOR_EVENT, ev.b, ev.n);
+            if (++gps_sent == 1 || !(gps_sent & 63))
+                a->lg("V61 GPS -> phone #%u lat_e7=%d lon_e7=%d", gps_sent, lat_e7, lon_e7);
+            continue;
+        }
         memset(&ev, 0, sizeof ev); memset(&outer, 0, sizeof outer); memset(&item, 0, sizeof item);
         ts = mono_us();
         pb_var(&ev, (1UL << 3)); pb_var(&ev, (unsigned long)(ts & 0xffffffffUL));   /* 32-bit us, wraps after 71 min */
         pb_u(&item, 1, (unsigned long)code);
-        if (kind == 1) { pb_u(&item, 2, val ? 1 : 0); pb_u(&item, 3, 0); pb_u(&item, 4, 0); pb_msg(&outer, 1, &item); pb_msg(&ev, 4, &outer); }
+        if (kind == CICAA_IN_KEY) { pb_u(&item, 2, val ? 1 : 0); pb_u(&item, 3, 0); pb_u(&item, 4, 0); pb_msg(&outer, 1, &item); pb_msg(&ev, 4, &outer); }
         else { pb_s32(&item, 2, val); pb_msg(&outer, 1, &item); pb_msg(&ev, 6, &outer); }
         send_msg(a, CH_INPUT, 0, 0x8001, ev.b, ev.n);
         a->lg("V49 input kind=%d code=%d val=%d", kind, code, val);
     }
-    if (g_proj_req) {
-        pb_t f; g_proj_req = 0; g_proj = 1;
-        memset(&f, 0, sizeof f); pb_u(&f, 1, 1); pb_u(&f, 2, 0);
-        send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
-        a->lg("V49 projection requested by plugin -> focus PROJECTED");
+    {   /* IDR request of a (re)attached cicaalive: answered here, every <= 100 ms. 1.0 only
+           checked it in on_video(), i.e. when the phone sent a frame - which it does not do
+           while the screen is static, so the picture stayed black after a display restart. */
+        int idr = av_native_want_idr();
+        if (idr || g_proj_req) {
+            pb_t f; g_proj_req = 0; g_proj = 1;
+            if (idr) {                     /* NATIVE -> PROJECTED forces a fresh IDR */
+                memset(&f, 0, sizeof f); pb_u(&f, 1, 2); pb_u(&f, 2, 0);
+                send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
+            }
+            memset(&f, 0, sizeof f); pb_u(&f, 1, 1); pb_u(&f, 2, 0);
+            send_msg(a, CH_VIDEO, 0, AV_VIDEO_FOCUS_IND, f.b, f.n);
+            a->lg("V49 focus PROJECTED (plugin / IDR request)");
+        }
     }
 }
 static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
@@ -439,7 +509,7 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             hexline(a, "AA SD request", b, n);
             if (send_sd_response(a)) return 1;
             if (*stage < 4) *stage = 4;
-            snprintf(summary, sn, "SD respondido; esperando canales");
+            snprintf(summary, sn, "SD answered; waiting for channels");
             return 0;
         case M_PING_REQ:
             pb_u(&r, 1, 0);   /* timestamp */
@@ -461,6 +531,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
         case M_SHUTDOWN_REQ:
             send_msg(a, CH_CONTROL, 0, M_SHUTDOWN_RESP, 0, 0);
             a->lg("AA phone requested shutdown");
+            return 1;
+        case M_SHUTDOWN_RESP:                 /* answer to our Disconnect (V58) */
+            a->lg("V58 phone confirmed shutdown");
             return 1;
         default:
             hexline(a, "AA ctrl body", b, n);
@@ -499,9 +572,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             hexline(a, "AA video start", b, n);
             /* field 1 = session id */
             if (n >= 2 && b[0] == 0x08) a->vsession = b[1] & 0x7f;
-            if (av_open(a->lg, 800, 480)) { snprintf(summary,sn,"V13 adaptador no disponible"); return 1; }
+            if (av_open(a->lg, 800, 480)) { snprintf(summary,sn,"V13 adapter not available"); return 1; }
             if (*stage < 6) *stage = 6;
-            snprintf(summary, sn, "VIDEO START sesion %d", a->vsession);
+            snprintf(summary, sn, "VIDEO START session %d", a->vsession);
             return 0;
         }
         if (id == AV_STOP) { av_close(); a->lg("AA video stop + V13 adapter closed"); return 0; }
@@ -518,9 +591,9 @@ static int dispatch(aa_t *a, int *stage, char *summary, size_t sn)
             return 0;
         }
         if (id == AV_MEDIA || id == AV_MEDIA_TS) {
-            if (on_video(a, id, b, n)) { snprintf(summary,sn,"V13 error adaptador video (ver log)"); return 1; }
+            if (on_video(a, id, b, n)) { snprintf(summary,sn,"V13 video adapter error (see log)"); return 1; }
             if (*stage < 7) *stage = 7;
-            snprintf(summary, sn, "VIDEO H.264 recibido: %lu tramas, %lu bytes", a->vframes, a->vbytes);
+            snprintf(summary, sn, "VIDEO H.264 received: %lu frames, %lu bytes", a->vframes, a->vbytes);
             return 0;
         }
     }
@@ -548,7 +621,7 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
     mbedtls_entropy_init(&ent); mbedtls_ctr_drbg_init(&rng);
     mbedtls_x509_crt_init(&crt); mbedtls_pk_init(&key);
     mbedtls_ssl_config_init(&cfg); mbedtls_ssl_init(&ssl);
-    snprintf(summary, sn, "sin respuesta del movil");
+    snprintf(summary, sn, "no response from phone");
 
     /* 1. version */
     st("AA: VERSION_REQUEST");
@@ -598,13 +671,13 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
         if (rc == 0) break;
         if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
             mbedtls_strerror(rc, e, sizeof e);
-            lg("AA TLS FAIL -0x%04x %s (alerta del movil = cert HU no aceptado?)", -rc, e);
-            snprintf(summary, sn, "version OK, TLS fallo -0x%04x", -rc);
+            lg("AA TLS FAIL -0x%04x %s (phone alert = HU certificate rejected?)", -rc, e);
+            snprintf(summary, sn, "version OK, TLS failed -0x%04x", -rc);
             goto out;
         }
         if (rc == MBEDTLS_ERR_SSL_WANT_READ) {
             int r = read_msg(a, 8000);
-            if (r != 1) { lg("AA TLS waiting phone rc=%d", r); snprintf(summary, sn, "version OK, TLS sin respuesta"); goto out; }
+            if (r != 1) { lg("AA TLS waiting phone rc=%d", r); snprintf(summary, sn, "version OK, TLS no response"); goto out; }
             if (a->msgn >= 2 && ((a->msg[0] << 8) | a->msg[1]) == M_SSL) {
                 lg("AA rx SSL_HANDSHAKE %u bytes", (unsigned)(a->msgn - 2));
                 tin_push(a, a->msg + 2, a->msgn - 2);
@@ -636,13 +709,13 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
 #endif
     if (a->cfd >= 0 && write(a->cfd, "CICCAP01", 8) == 8) a->cbytes = 8;
     else if (a->cfd >= 0) { close(a->cfd); a->cfd = -1; }
-    st("AA: sesion activa");
+    st("AA: session active");
 
     /* 4.. main loop: up to 10 min or 60 s of silence */
     g_proj = 1; g_proj_req = 0;
     for (i = 0; idle < 600; ++i) {
         int r;
-        if (av_failed()) { snprintf(summary,sn,"V13 fallo backend video (ver log)"); break; }
+        if (av_failed()) { snprintf(summary,sn,"V13 video backend failure (see log)"); break; }
         input_drain(a);
         r = read_msg(a, 100);
         if (r == 0) { ++idle; continue; }
@@ -651,7 +724,7 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
         if (dispatch(a, &stage, summary, sn)) break;
         if (stage >= 7 && a->vframes % 60 == 0) {
             char m[96];
-            snprintf(m, sizeof m, "AA: video %lu tramas %lu KB", a->vframes, a->vbytes / 1024);
+            snprintf(m, sizeof m, "AA: video %lu frames %lu KB", a->vframes, a->vbytes / 1024);
             st(m);
         }
     }
