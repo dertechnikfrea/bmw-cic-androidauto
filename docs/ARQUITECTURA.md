@@ -132,3 +132,5 @@ Otros límites del DSP, que no se tocan (por eso no hay pantalla completa a 1280
 | `/mnt/hbdebug/aap/logs/*.log` | plugin, libcicaa, cicaalive | solo con logs ON |
 | `/dev/shmem/aap.stop`, `aap.seed`, anillos `/cicaa_*` | todos | RAM, se pierden al reiniciar |
 | enlace de prefijo de la imagen DSP | dspload | RAM |
+
+Más datos encontrados por los colaboradores (GPS, teclas, DSP, perfiles de HmiMain): [HALLAZGOS.md](HALLAZGOS.md).
