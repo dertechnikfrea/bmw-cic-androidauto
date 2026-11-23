@@ -8,6 +8,7 @@
 #       HDD   /mnt/hbdebug/aap : libcicaa.so cicaalive dspload hu.crt hu.key
 #                                dvd_dm642_aa.bin (patched from the car's own DSP image)
 #       flash /mnt/EFS_RO/Hmi/data/ro/Plugins/AAP : AAPlugin.so .xml .manifest
+#       alt   /mnt/hbuser/*/ro/Plugins/AAP (if present) : AAPlugin.xml .manifest
 #  3. Removes the old development plugin (Plugins/CMD with CicMenuDemo.so),
 #     backing it up to the stick (AALEGACY/).
 #  4. Reboots the CIC only if something changed (so it never loops).
@@ -123,6 +124,16 @@ if [ "$PCHG" = 1 ] || [ "$LCHG" = 1 ]; then
 else
  echo PLUGIN_SAME
 fi
+# ---- 2c. alternative HmiMain from /mnt/hbuser (e.g. F30 Rev 76617, run with
+# -ro=/mnt/hbuser/f30/ro): it reads plugin manifests from its own ro/Plugins.
+# The manifest points to the flash .so, so only .xml/.manifest are needed.
+# Skipped when that folder does not exist.
+for ALT in /mnt/hbuser/*/ro/Plugins; do
+ [ -d "$ALT" ] || continue
+ mkdir -p "$ALT/AAP" || { echo "ALT_DIR_FAIL $ALT"; continue; }
+ for S in xml manifest; do inst "$PAY/AAPlugin.$S" "$ALT/AAP/AAPlugin.$S" 644; done
+ ls -l "$ALT/AAP"
+done
 ls -l "$TARGET" "$DIR"
 flush
 if [ "$CHANGED" = 1 ]; then
