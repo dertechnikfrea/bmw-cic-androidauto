@@ -1,7 +1,7 @@
 # Hallazgos de los colaboradores
 
 Datos sacados en el coche y en los firmwares por quienes han contribuido al
-proyecto (tester del Z4 E89, Cars Done con el E60 LCI, puerto F30). Entre
+proyecto (tester del Z4 E89, Cars Done con el E60 LCI, puerto F30, E9x LCI con C16A). Entre
 corchetes, el commit. Los apartados marcados *(PR #4)* están en la rama
 `contrib-z4-patches`, todavía no fusionada en `main`.
 
@@ -74,3 +74,71 @@ corchetes, el commit. Los apartados marcados *(PR #4)* están en la rama
 - Sin sensor NIGHT_DATA (forzaba "día"); espera teléfono 30 s (no 120) [c7706d3].
 - Pérdida de foco (MENU, PDC, OPTION) → vídeo se reanuda solo; `live_video_ready()` solo espera SPS/PPS;
   IDR de cicaalive respondido en `input_drain()` (<100 ms) [c922f44].
+
+## 7. Micrófono, voz de AA y tecla de voz (E9x LCI, software C16A)
+Nada de este apartado está implementado en el código de este repo. Son datos de un E9x LCI con
+software C16A, probados en el coche con un módulo aparte cargado en HmiMain (compilado fuera de
+este repo con GCC para SH4). Las direcciones marcadas *C16A* son de ese HmiMain
+(`B1103-500-1048A Build 43`); las demás son las de 9283417A que ya usa el plugin.
+
+### Dispositivos io-audio
+- Captura 0 `FACBMIC` (`/dev/snd/FACBMIC`): micrófono del coche, 4 voces; la voz está en la **voz 2**
+  (config. del reconocimiento de voz BMW: `Inp_1 = PAL,FACBMIC,2,…`). Sin una conexión de audio de voz
+  activa solo entrega ceros.
+- Reproducción 1 `FABSDS`: salida de los avisos del diálogo de voz BMW (`AmxPrompting_1`).
+
+### Conexión de audio 0x31
+- La misma llamada con la que el plugin pide `0xC4` (`0x08b9d308` sobre `cm+0x6c8`; liberar:
+  `0x08b9d460` sobre `cm+0x760`) con id **`0x31`** conecta el micrófono a FACBMIC y hace audible
+  FABSDS. Es la conexión que pide el control por voz BMW (`CSpeechActivationFilter::onISpeechDialogStatus`,
+  junto con `0x2C`, que no se investigó).
+- `0x31` desplaza a `0xC4`: la música calla, igual que con el control por voz BMW.
+- Pedida justo después de `0xC4` al arrancar la imagen → `0xC4` rechazada y no hay imagen. Hay que
+  pedirla solo cuando el teléfono abre el micrófono.
+- Al liberar `0x31`, `0xC4` **no** vuelve sola: hay que pedirla otra vez.
+- Con `0x31` activa, el servicio de voz BMW (`scp`) abre FACBMIC; quien abre primero se queda con el
+  audio. Solución: abrir la captura al mostrar la imagen AA y mantenerla abierta.
+- Las llamadas van solo en el hilo HMI, por el executor de la ProcUnit (como los pasos IBA).
+  `PluginApp::post()` desde el hilo de la sesión AA colgó el HMI.
+
+### Micrófono: canal 7 del protocolo AA
+1. Se abre el Assistant → canal 0 `VOICE_SESSION_REQUEST` (0x0011).
+2. Canal 7 `0x8005` con open = 1 (campo 1) y max_unacked = 2 (campo 4) → responder `0x8006` con
+   `08 00 10 00` (sesión 0, estado 0 = OK; estado 1 = rechazado).
+3. Enviar cada 32 ms un `0x0000`: 8 bytes de timestamp (µs, big endian) + 1024 bytes PCM
+   (16 kHz, mono, S16LE). El teléfono confirma cada paquete con `0x8004`.
+4. Canal 7 `0x8005` con open = 0 → fin. La respuesta del Assistant llega por el canal 5.
+- Captura usada: `snd_pcm_open(card 0, dev 0, capture)`, 16 kHz, 4 voces, S16LE, fragmento 2048;
+  de cada frame solo se envía la voz 2.
+
+### Voz de AA (canal 5): respuestas del Assistant
+- Con el DSP en modo AAC, `cicaalive` solo le pasa el canal 4, así que el canal 5 nunca suena
+  (issue #12, punto 2).
+- Funciona reproducirla en FABSDS mientras `0x31` está activa: `snd_pcm_open(card 0, dev 1, playback)`,
+  16 kHz mono S16LE, fragmento 1024, máx. 12 fragmentos, leyendo el canal 1 de `/cicaa_audio`.
+- El canal 5 llega más rápido que en tiempo real y con AV start/stop por frase. Hizo falta:
+  prebuffer de 0,35 s; no parar con el AV stop sino cuando todo se ha reproducido (y
+  `playback_drain` antes de cerrar); mantener `0x31` unos 4 s tras cerrar el micrófono, para que la
+  respuesta no espere al cambio de conexión; conservar la posición de lectura entre frases, para no
+  repetir voz antigua.
+- Las indicaciones de navegación usan el mismo canal; no se probaron expresamente.
+
+### Tecla de voz del volante (PTT) → Assistant
+- Proxy `CPxyControlElementsMFL::CPTTButton1` (símbolo `_ZTVN22CPxyControlElementsMFL11CPTTButton1E`);
+  el handler está en símbolo + 32, la misma entrada que en las teclas skip del apartado 2.
+  *C16A*: vtable `0x091cc9c8`, handler `0x08b7b4e8`.
+- Aquí no sirve llamar primero al original: arrancaría el control por voz BMW. Para un mensaje de
+  estado (`*(u8*)(msg+8) == 12`) se hace lo mismo que el handler, `valid(this,0)` →
+  `decode(msg, this+124, 3)` → `valid(this,1)`, pero **sin** avisar a los listeners
+  (`notify(this+80, this)` y `notify(this+112, this)`). Valor en `this+124`: 1 = pulsada, 0 = suelta.
+  *C16A*: valid `0x08cf17c0`, notify `0x08b2e528`, decode `0x08b7ba78`.
+- Cada pulsación llega a **3 instancias** del proxy: enviar la tecla solo en el primer cambio de valor.
+- KEYCODE_SEARCH (84), down y up seguidos, abre el Assistant. Solo con la imagen AA visible; fuera
+  de ella se llama al handler original y el control por voz BMW funciona como siempre.
+
+### Sin solución
+- Botón de volumen (pulsar): no llega a ningún proxy del HMI (24 proxies sondeados con la imagen AA
+  visible), así que no sirve como play/pausa. El mute lo hace el sistema de audio sin pasar por el HMI.
+- PDC: `sensors.PDCStatus` y `driving.gear` como `raDataRequestModel` se registran, pero nunca
+  llegan datos; por CDS (`cdsAddPropertyChangedEventHandler`, `cdsGetPropertyAsync`) tampoco
+  responde nada a un plugin local.
