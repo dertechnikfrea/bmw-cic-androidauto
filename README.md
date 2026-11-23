@@ -221,13 +221,21 @@ To support one:
    image (`memifs2 -o 0x00740000` in `/etc/starter.cfg`). Over telnet, copy the raw
    flash (read only): `cp /dev/fs0 /fs/usb0/fs0.img`. Never copy anything *to*
    `/dev/fs0*`.
-2. `python tools/hmi_profile.py --extract fs0.img HmiMain`
+2. `python tools/hmi_profile.py --extract fs0.img HmiMain` (a dump of the partition
+   `/dev/fs0p2` works too)
 3. `python tools/hmi_profile.py HmiMain --name "E.. ..."`: it finds the 47 code
    fingerprints (masking literal-pool addresses), resolves repeated ones with the
    shift of their neighbours, moves the data addresses by the measured data shift and
    checks every vtable by its C++ type name. It refuses to print an incomplete table.
 4. Add the output to `src/plugin/iba_profiles.h`, rename its `kXlat_X` / `kSigFix_X`
    tables (e.g. `kXlatE61`, `kSigFixE61`) and add a line to `kIbaProfiles`.
+
+If step 3 reports a fingerprint as not found or ambiguous, or a data address it cannot
+check, the build is more than a shifted copy (another CIC software version). Find those
+addresses by hand (disassembly, memory dump of the running HmiMain) and give each one
+with `--pin 0xOLD=0xNEW`: the tool then completes the table, takes the vtables from
+their symbols where the data did not move by one shift, and marks the pinned lines.
+It also warns about fingerprints it took by their position; check those lines too.
 
 At run time the plugin uses the first profile whose fingerprints all match; with
 logs ON, `plugin.log` shows `HmiMain profile ...`.

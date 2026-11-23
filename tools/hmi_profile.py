@@ -15,17 +15,29 @@ then extract it with:            hmi_profile.py --extract fs0.img HmiMain
 
 Usage:
   hmi_profile.py --extract fs0.img HmiMain        extract HmiMain from a flash dump
+                                                  (/dev/fs0, or the partition /dev/fs0p2)
   hmi_profile.py HmiMain [--name "E60 ..."]       print a profile for iba_profiles.h
+               [--pin 0xOLD=0xNEW ...]            give an address found by hand
 
 Method:
   * every code fingerprint (kIbaAnchors, kIbaMarshalSigs: 32 bytes each) is searched
     in the new HmiMain; bytes inside the fingerprint that are absolute addresses
     (literal pool words) are masked, because they move with the code;
   * fingerprints found more than once are resolved with the shift of their
-    neighbours (code moves by a constant amount inside a region);
+    neighbours (code moves by a constant amount inside a region); if that fails,
+    the hit is taken when exactly one lies between the new addresses of its
+    neighbours (functions keep their order), with a warning to check it;
   * data addresses (vtables, one static) are moved by the data shift measured on
     the masked literal words, and every vtable is checked through its C++ typeinfo
-    name.
+    name. The type each vtable must have is read from the "vtable <type>" notes of
+    the profiles already in iba_profiles.h. If the shifted address is not that
+    type (another CIC software version: the data does not move by one shift), the
+    vtable is taken from its dynamic symbol (_ZTV<type> + 8) instead. A data
+    address without a type cannot be checked then and has to be pinned;
+  * --pin gives the new address of one the tool cannot find: a function whose code
+    changed (its fingerprint is not in this HmiMain), an ambiguous fingerprint or a
+    static. Pinned addresses are marked in the output; a pinned function gets the
+    bytes of this build in the SigFix table.
   * the skip-key hooks (KeyHook in AAPlugin.cpp) are taken from their vtable symbol
     (slot 8 = handler) in the dynamic symbols; the getter moves with the handler and
     must match kKeyGetterSig. If that fails only a warning is printed: the plugin
@@ -148,10 +160,21 @@ def key_hooks():
 KEY_SLOT = 8    # vtable[8] = message handler (see KeyHook in AAPlugin.cpp)
 
 
-def resolve_key_hooks(img, hooks, sig):
+def known_vtable_types():
+    """{address in the base build: C++ type name}, from the "vtable <type>" notes of the
+    profiles already in iba_profiles.h (written by this tool from other builds)."""
+    out, clash = {}, set()
+    for m in re.finditer(r"\{0x([0-9a-fA-F]+)UL,\s*0x[0-9a-fA-F]+UL\},\s*/\* vtable (\w+) ",
+                         (PLUGIN / "iba_profiles.h").read_text()):
+        a = int(m.group(1), 16)
+        if out.setdefault(a, m.group(2)) != m.group(2):
+            clash.add(a)
+    return {a: t for a, t in out.items() if a not in clash}
+
+
+def resolve_key_hooks(img, hooks, sig, syms):
     """Handler = vtable symbol slot 8 in the new build; getter moves with it and must
     match the getter signature. Returns ({old: new}, notes, errors)."""
-    syms = img.dynsym() if hooks else {}
     xlat, notes, errors = {}, {}, []
     for name, handler, getter in hooks:
         vt = syms.get(name)
@@ -196,37 +219,58 @@ def literal_mask(addr, sig):
     return mask
 
 
-def resolve(img, sigs):
+def by_shift(img, anchors, i, a, h):
+    """Hits whose shift lies between the shifts of the two neighbours."""
+    lo = anchors[i - 1][1] if i > 0 else anchors[0][1]
+    hi = anchors[i][1] if i < len(anchors) else anchors[-1][1]
+    c = [x for x in h if min(lo, hi) <= x - a <= max(lo, hi)]
+    if len(c) > 1:      # several inside the range: take the one with a neighbour's exact shift
+        c = [x for x in c if x - a in (lo, hi)]
+    return c
+
+
+def by_order(img, anchors, i, a, h):
+    """Hits between the new addresses of the two neighbours (functions keep their order)."""
+    lo = sum(anchors[i - 1]) if i > 0 else img.text[0] - 1
+    hi = sum(anchors[i]) if i < len(anchors) else img.text[0] + img.text[2]
+    return [x for x in h if lo < x < hi]
+
+
+def resolve(img, sigs, pins):
+    """Returns ({old: new}, masks, unresolved, missing, hits, ordered); pins are given
+    addresses of fingerprints, ordered the fingerprints resolved by by_order()."""
     hits, masks = {}, {}
     for a, b in sigs.items():
         m = literal_mask(a, b)
         masks[a] = m
         hits[a] = find_all(img, b, m)
-    missing = [a for a, h in hits.items() if not h]
-    anchors = sorted((a, h[0] - a) for a, h in hits.items() if len(h) == 1)
+    missing = [a for a, h in hits.items() if not h and a not in pins]
+    anchors = sorted([(a, h[0] - a) for a, h in hits.items() if len(h) == 1 and a not in pins]
+                     + [(a, n - a) for a, n in pins.items()])
     if not anchors:
         raise SystemExit("no fingerprint found exactly once: this is not a compatible HmiMain")
+    ordered = set()
     changed = True
     while changed:
         changed = False
         xs = [x for x, _ in anchors]
-        for a, h in hits.items():
-            if a in xs or not h:
-                continue
-            i = bisect.bisect(xs, a)
-            lo = anchors[i - 1][1] if i > 0 else anchors[0][1]
-            hi = anchors[i][1] if i < len(anchors) else anchors[-1][1]
-            c = [x for x in h if min(lo, hi) <= x - a <= max(lo, hi)]
-            if len(c) > 1:      # several inside the range: take the one with a neighbour's exact shift
-                c = [x for x in c if x - a in (lo, hi)]
-            if len(c) == 1:
-                anchors.append((a, c[0] - a))
-                anchors.sort()
-                changed = True
+        for rule in (by_shift, by_order):   # by_order only when by_shift resolves nothing more
+            for a, h in hits.items():
+                if a in xs or not h:
+                    continue
+                c = rule(img, anchors, bisect.bisect(xs, a), a, h)
+                if len(c) == 1:
+                    anchors.append((a, c[0] - a))
+                    anchors.sort()
+                    if rule is by_order:
+                        ordered.add(a)
+                    changed = True
+                    break
+            if changed:
                 break
     resolved = dict(anchors)
     unresolved = {a: h for a, h in hits.items() if h and a not in resolved}
-    return {a: a + d for a, d in resolved.items()}, masks, unresolved, missing
+    return {a: a + d for a, d in resolved.items()}, masks, unresolved, missing, hits, ordered
 
 
 def data_shift(img, sigs, masks, tmap):
@@ -258,26 +302,50 @@ def text_shift_near(tmap, a):
 
 
 # ---------------------------------------------------------------- main
+def find_in_image(d, base, want):
+    """(offset, size) of a file in the image filesystem at base, or None."""
+    try:
+        dir_off, = struct.unpack_from("<I", d, base + 16)
+        p = base + dir_off
+        while True:
+            size, _, _, mode = struct.unpack_from("<HHII", d, p)
+            if size < 24:       # 0 = end of the directory; less than an entry header = not a directory
+                return None
+            if mode & 0o170000 == 0o100000:
+                off, fsz = struct.unpack_from("<II", d, p + 24)
+                if d[p + 32:p + size].split(b"\0")[0] == want and base + off + fsz <= len(d):
+                    return base + off, fsz
+            p += size
+    except struct.error:        # not an image directory
+        return None
+
+
 def extract(fs0, out):
     d = Path(fs0).read_bytes()
-    base = 0x00740000
-    if d[base:base + 7] != b"imagefs":
-        raise SystemExit("no imagefs at 0x740000 in this dump")
-    dir_off, = struct.unpack_from("<I", d, base + 16)
-    p = base + dir_off
-    while True:
-        size, _, _, mode = struct.unpack_from("<HHII", d, p)
-        if size == 0:
-            break
-        if mode & 0o170000 == 0o100000:
-            off, fsz = struct.unpack_from("<II", d, p + 24)
-            name = d[p + 32:p + size].split(b"\0")[0].decode()
-            if name == "usr/Hmi/bin/HmiMain":
-                Path(out).write_bytes(d[base + off:base + off + fsz])
-                print("extracted %s (%d bytes)" % (out, fsz))
-                return
-        p += size
-    raise SystemExit("usr/Hmi/bin/HmiMain not found in the image")
+    # /dev/fs0 has the second boot image at 0x740000; in a dump of a partition (/dev/fs0p2)
+    # it is somewhere else, so every "imagefs" header is tried after that one.
+    bases = [0x00740000] + [m.start() for m in re.finditer(b"imagefs", d)]
+    for base in bases:
+        if d[base:base + 7] != b"imagefs":
+            continue
+        hit = find_in_image(d, base, b"usr/Hmi/bin/HmiMain")
+        if hit and d[hit[0]:hit[0] + 4] == b"\x7fELF":
+            Path(out).write_bytes(d[hit[0]:hit[0] + hit[1]])
+            print("extracted %s (%d bytes, image at 0x%x)" % (out, hit[1], base))
+            return
+    raise SystemExit("usr/Hmi/bin/HmiMain not found in an image filesystem of this dump")
+
+
+def parse_pins(argv):
+    pins = {}
+    for i, x in enumerate(argv):
+        if x == "--pin":
+            try:
+                old, new = (int(v, 16) for v in argv[i + 1].split("="))
+            except (IndexError, ValueError):
+                raise SystemExit("--pin needs 0xOLD=0xNEW (address in the source = address in this HmiMain)")
+            pins[old] = new
+    return pins
 
 
 def main(argv):
@@ -288,44 +356,94 @@ def main(argv):
     name = argv[argv.index("--name") + 1] if "--name" in argv else Path(argv[1]).name
     img = Image(Path(argv[1]).read_bytes())
     sigs, used = plugin_inputs()
+    hooks, getter_sig = key_hooks()
+    hook_addrs = {a for _, h, g in hooks for a in (h, g)}
+    pins = parse_pins(argv)
+    for a, n in pins.items():
+        if a in hook_addrs:
+            raise SystemExit("--pin %#x: the skip-key hooks are taken from their vtable symbols" % a)
+        if a not in used and a not in sigs:
+            raise SystemExit("--pin %#x: not an address the plugin uses" % a)
+        if img.off(n) is None or (a in sigs and (not img.in_text(n) or n % 2)):
+            raise SystemExit("--pin %#x=%#x: not a possible address in this HmiMain" % (a, n))
     m = re.search(rb"CIC_L6_[ -~]{10,90}", img.d)
     build = m.group().decode() if m else "unknown build"
-    tmap, masks, unresolved, missing = resolve(img, sigs)
+    tmap, masks, unresolved, missing, hits, ordered = resolve(img, sigs, {a: n for a, n in pins.items() if a in sigs})
     ok = not unresolved and not missing
     for a in missing:
-        print("ERROR fingerprint %#x not found" % a, file=sys.stderr)
+        print("ERROR fingerprint %#x not found (code changed in this build? find the function by hand, then --pin)"
+              % a, file=sys.stderr)
     for a, h in unresolved.items():
-        print("ERROR fingerprint %#x ambiguous: %s" % (a, [hex(x) for x in h[:8]]), file=sys.stderr)
+        print("ERROR fingerprint %#x ambiguous: %s (--pin the right one)" % (a, [hex(x) for x in h[:8]]), file=sys.stderr)
+    for a in sorted(ordered):
+        print("WARNING fingerprint %#x found %d times: %#x taken by its position between its neighbours, check it"
+              % (a, len(hits[a]), tmap[a]), file=sys.stderr)
 
-    dshift = data_shift(img, sigs, masks, tmap)
+    def new_bytes(a):
+        return img.d[img.off(tmap[a]):img.off(tmap[a]) + 32]
+
+    def same_code(a):   # fingerprint matches at the new address (literal pool words aside)
+        return all(not masks[a][j] or new_bytes(a)[j] == sigs[a][j] for j in range(32))
+
+    notes = {a: "fingerprint found %d times, taken by its position between its neighbours" % len(hits[a]) for a in ordered}
+    for a in pins:
+        if a in sigs:
+            notes[a] = "pinned by hand: " + ("fingerprint found %d times" % len(hits[a]) if same_code(a)
+                                             else "code differs from the fingerprint")
+    # a pinned function with other code has no literal words where the fingerprint had them
+    dshift = data_shift(img, sigs, masks, {a: n for a, n in tmap.items() if same_code(a)})
     xlat = dict(tmap)
-    hooks, getter_sig = key_hooks()
-    kx, notes, kerr = resolve_key_hooks(img, hooks, getter_sig)
+    syms = img.dynsym()
+    kx, knotes, kerr = resolve_key_hooks(img, hooks, getter_sig, syms)
     for e in kerr:    # optional feature: the plugin's own checks keep the hook off
         print("WARNING %s: skip keys stay off on this build" % e, file=sys.stderr)
     xlat.update(kx)
-    skip = set(tmap) | {a for _, h, g in hooks for a in (h, g)}
-    for a in sorted(used - skip):
-        if a >= img.data_seg[0] - 0x00100000 and a >= 0x09000000:
-            if dshift is None:
+    notes.update(knotes)
+    types = known_vtable_types()
+    by_symbol, untyped = [], []
+    for a in sorted(used - set(sigs) - hook_addrs):
+        if a in pins:
+            cls = vtable_class(img, pins[a])
+            xlat[a] = pins[a]
+            notes[a] = "pinned by hand" + (": vtable " + cls if cls else "")
+        elif a >= img.data_seg[0] - 0x00100000 and a >= 0x09000000:
+            n = a + dshift if dshift is not None else None
+            cls = vtable_class(img, n) if n is not None else None
+            want = types.get(a)
+            if want and cls != want:    # not where the common shift puts it: take the vtable by its symbol
+                s = syms.get("_ZTV" + want)
+                if s is None or vtable_class(img, s + 8) != want:
+                    print("ERROR vtable %s (%#x) not found in this HmiMain" % (want, a), file=sys.stderr); ok = False; continue
+                n, cls = s + 8, want
+                by_symbol.append(a)
+            elif n is None:
                 print("ERROR no data shift for %#x" % a, file=sys.stderr); ok = False; continue
-            n = a + dshift
-            cls = vtable_class(img, n)
             xlat[a] = n
-            notes[a] = ("vtable " + cls) if cls else "data (static, not verifiable by type)"
+            if cls:
+                notes[a] = "vtable " + cls + (" (by symbol)" if a in by_symbol else "")
+            else:
+                notes[a] = "data (static, not verifiable by type)"
+                untyped.append(a)
         else:
             d = text_shift_near(tmap, a)
             if d is None:
                 print("ERROR no unambiguous code shift for %#x" % a, file=sys.stderr); ok = False; continue
             xlat[a] = a + d
             notes[a] = "code, shift of neighbours (no fingerprint)"
-    # fingerprints whose literal words moved: give the bytes of the new build
-    fixes = {a: img.d[img.off(n):img.off(n) + 32] for a, n in tmap.items()
-             if img.d[img.off(n):img.off(n) + 32] != sigs[a]}
+    if by_symbol:   # the data did not move by one shift, so an address without a type cannot be trusted
+        for a in untyped:
+            print("ERROR %#x has no type to check and the data of this build does not move by one shift "
+                  "(%d vtables taken by symbol): find it by hand, then --pin" % (a, len(by_symbol)), file=sys.stderr)
+            ok = False
+    # fingerprints whose literal words moved (or pinned functions with other code): the bytes of the new build
+    fixes = {a: new_bytes(a) for a in tmap if new_bytes(a) != sigs[a]}
 
     print("/* %s: %s */" % (name, build))
-    print("/* generated by tools/hmi_profile.py: %d fingerprints, data shift %s */"
-          % (len(tmap), hex(dshift) if dshift is not None else "?"))
+    print("/* generated by tools/hmi_profile.py: %d fingerprints, data shift %s%s */"
+          % (len(tmap), hex(dshift) if dshift is not None else "?",
+             ", %d vtables by symbol" % len(by_symbol) if by_symbol else ""))
+    if pins:
+        print("/* pinned by hand (--pin): %s */" % ", ".join("0x%08x" % a for a in sorted(pins)))
     print("static const IbaXlat kXlat_X[] = {")
     for a in sorted(xlat):
         c = (" /* %s */" % notes[a]) if a in notes else ""
