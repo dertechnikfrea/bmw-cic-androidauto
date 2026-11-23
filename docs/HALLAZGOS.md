@@ -63,7 +63,8 @@ corchetes, el commit. Los apartados marcados *(PR #4)* están en la rama
   versión de software, no un simple desplazamiento: text −0x6d64..−0x295d8 por bloques, data/vtables
   −0x406dc..−0x40c70; 58 direcciones, 3 SigFix (2 por literales, 1 por la función de rol `0x08d6ebbc`,
   cuyo código es distinto). Mapeado a mano: `hmi_profile.py` no encuentra la función cambiada.
-  Direcciones probadas en coche con binarios parcheados; el build desde fuente está sin probar.
+  Probado en coche con el binario 1.0 parcheado con estas direcciones; las direcciones de las teclas
+  skip y el build desde fuente están sin probar.
 - Firmware desconocido → no toca nada ("HmiMain distinto").
 - **Cómo sacar HmiMain**: no es fichero en el CIC; está en la 2ª boot image
   (`memifs2 -o 0x00740000` en `/etc/starter.cfg`). Copia raw solo lectura: `cp /dev/fs0 /fs/usb0/fs0.img`

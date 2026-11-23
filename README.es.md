@@ -31,8 +31,9 @@ Problemas conocidos: algún corte o congelación breve de imagen cuando el DSP v
   * 9283417A, probada en un E9x (las direcciones del código son de esta versión);
   * `CIC_L6_1107_Release B1107-501-1121A Build 11`, probada en un E60 LCI;
   * `CIC_L6_1103_Release B1103-500-1048A Build 43` (software del CIC C16A, E9x LCI):
-    estas direcciones se probaron en el coche con binarios parcheados; el perfil
-    compilado desde el código fuente aún no está probado.
+    probada en el coche con el binario de la versión 1.0 parcheado con estas
+    direcciones; las direcciones de las teclas skip y el perfil compilado desde el
+    código fuente aún no están probados.
 
   Si tu HmiMain es otra versión, el plugin no toca nada y muestra
   "HmiMain distinto: no compatible"; ver [Otras versiones de HmiMain](#otras-versiones-de-hmimain).

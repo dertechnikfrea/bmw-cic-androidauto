@@ -29,9 +29,9 @@ Known issues: occasional short audio cuts or video freezes when the DSP is at 10
   signatures. Known HmiMain builds (`src/plugin/iba_profiles.h`):
   * 9283417A, tested on an E9x (the addresses in the source are for this build);
   * `CIC_L6_1107_Release B1107-501-1121A Build 11`, tested on an E60 LCI;
-  * `CIC_L6_1103_Release B1103-500-1048A Build 43` (CIC software C16A, E9x LCI): these
-    addresses were tested in the car with patched binaries; the profile built from
-    source is not tested yet.
+  * `CIC_L6_1103_Release B1103-500-1048A Build 43` (CIC software C16A, E9x LCI): tested
+    in the car with the release 1.0 binary patched to these addresses; the skip-key
+    addresses and the profile built from source are not tested yet.
 
   If your HmiMain is another build, the plugin touches nothing and shows
   "HmiMain distinto: no compatible"; see [Other HmiMain builds](#other-hmimain-builds).
