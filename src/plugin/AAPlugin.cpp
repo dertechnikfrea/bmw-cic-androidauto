@@ -1172,8 +1172,9 @@ static void location_activate(bmw::PluginApp* app) {
  * key 87 NEXT / 88 PREVIOUS (down, then up on release); duplicates are dropped. In BT
  * Audio mode nothing is sent: the CIC's Bluetooth source gets the keys as always.
  * Safety: installed at the first Connect (not at create, so a mistake cannot cause a
- * boot loop), only if the vtable entry and the first 12 bytes of the getter match
- * HmiMain 9283417A; restored in aap_destroy. */
+ * boot loop), only if the vtable entry and the first 12 bytes of the getter match the
+ * running HmiMain (addresses written for 9283417A, translated by iba_a() for the other
+ * known builds); restored in aap_destroy. */
 typedef int (*MsgHandler)(void*, void*);
 typedef void (*KeyGetter)(void*, int*);
 static const unsigned long kKeyGetterSig[3] = {0x2f962f86UL, 0x2fe62fc6UL, 0xc70e4f22UL};
@@ -1214,11 +1215,13 @@ static int key_hook_panel(void* self, void* msg) { return key_hook(1, self, msg)
 static void keys_install() {
     if (g_keys_tried) return;
     g_keys_tried = 1;
+    iba_profile_select();                                  /* iba_a() needs the build profile */
     void* self = dlopen(0, 2);
     for (int k = 0; k < 2; ++k) {
         KeyHook& h = g_kh[k];
         unsigned long* vt = self ? (unsigned long*)dlsym(self, h.vtable) : 0;
         unsigned long* slot = vt ? vt + 8 : 0;             /* vtable symbol + 32 bytes */
+        h.orig = iba_a(h.orig); h.getter = iba_a(h.getter);  /* this HmiMain build */
         const unsigned long* g = (const unsigned long*)h.getter;
         int ok = slot && *slot == h.orig && g[0] == kKeyGetterSig[0] && g[1] == kKeyGetterSig[1] && g[2] == kKeyGetterSig[2];
         if (ok) { h.slot = slot; *slot = (unsigned long)h.hook; }   /* one aligned store */

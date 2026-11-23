@@ -40,9 +40,13 @@ static const IbaXlat kXlatE60[] = {
     {0x08b64d18UL, 0x08b63e88UL},
     {0x08b65790UL, 0x08b64900UL},
     {0x08b6964cUL, 0x08b687bcUL},
+    {0x08b9358cUL, 0x08b926fcUL}, /* panel skip key: getter, handler (vtable slot 8) */
+    {0x08b935dcUL, 0x08b9274cUL},
     {0x08b9d1b0UL, 0x08b9c320UL},
     {0x08b9d308UL, 0x08b9c478UL},
     {0x08b9d460UL, 0x08b9c5d0UL},
+    {0x08ba0b60UL, 0x08b9fcd0UL}, /* steering-wheel search keys: getter, handler */
+    {0x08ba0bb0UL, 0x08b9fd20UL},
     {0x08ce0fc4UL, 0x08ce0118UL},
     {0x08ce111cUL, 0x08ce0270UL},
     {0x08ce135cUL, 0x08ce04b0UL},
