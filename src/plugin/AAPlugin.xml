@@ -16,9 +16,9 @@
     <hmiStates>
       <hmiState id="10" text="Android Auto">
         <components>
-          <button id="11" action="181" text="Conectar Android Auto" />
-          <button id="12" action="185" text="Logs ON/OFF" />
-          <label id="13" text="Estado: " model="182" />
+          <button id="11" action="181" text="Android Auto" />
+          <button id="12" action="185" text="Logs" />
+          <label id="13" text="AA: " model="182" />
           <label id="14" text="Logs: " model="186" />
         </components>
       </hmiState>
@@ -28,7 +28,7 @@
           <label id="212" text="Android Auto" />
         </components>
         <toolbarComponents>
-          <button id="217" action="204" text="Volver">
+          <button id="217" action="204" text="Menu">
             <properties><property id="1" value="true" /><property id="22" value="true" /></properties>
           </button>
         </toolbarComponents>

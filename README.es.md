@@ -37,15 +37,20 @@ Problemas conocidos: algún corte o congelación breve de imagen cuando el DSP v
 
 En **Multimedia → Android Auto** aparece una pantalla con:
 
-* **Conectar Android Auto**: arranca AA. Conecta el móvil al USB; en unos segundos
+* **Android Auto**: arranca AA. Conecta el móvil al USB; en unos segundos
   aparece AA. La ruleta, el pulsador y las direcciones del iDrive van al móvil.
-  **MENU** o **Volver** te devuelven al coche sin cortar AA; volver a pulsar
-  *Conectar* vuelve a AA.
-* **Logs ON/OFF**: activa o desactiva el registro. **Por defecto no se escribe
+  La tecla **MENU** o el botón **Menu** te devuelven al coche sin cortar AA;
+  volver a pulsar *Android Auto* vuelve a AA.
+* **Logs**: activa o desactiva el registro. **Por defecto no se escribe
   nada en ningún sitio.** Con logs ON se escribe en `/mnt/hbdebug/aap/logs/`; la
   próxima vez que arranques el CIC con el USB de instalación puesto, los logs se
   copian al USB (`AALOGS/`) y se borran del CIC.
-* **Estado**: línea con lo que está pasando.
+* **AA:** (estado): línea con lo que está pasando.
+
+Los textos de estado siguen el idioma configurado en el CIC (se lee del HMI en
+cada pulsación): español, inglés, alemán, francés, italiano, neerlandés y
+portugués; cualquier otro idioma usa inglés. Las etiquetas fijas de los botones
+son neutras.
 
 ## Instalación
 

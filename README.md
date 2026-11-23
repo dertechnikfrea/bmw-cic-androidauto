@@ -36,15 +36,19 @@ Known issues: occasional short audio cuts or video freezes when the DSP is at 10
 
 **Multimedia → Android Auto** shows a page with:
 
-* **Conectar Android Auto** (connect): starts AA. Plug the phone into the USB port;
+* **Android Auto**: starts AA. Plug the phone into the USB port;
   AA appears after a few seconds. The iDrive rotary, push and directions go to the
-  phone. **MENU** or **Volver** (back) return to the car UI without closing AA;
-  pressing *Conectar* again brings AA back.
-* **Logs ON/OFF**: enables or disables logging. **By default nothing is written
+  phone. The **MENU** key or the **Menu** button return to the car UI without
+  closing AA; pressing *Android Auto* again brings AA back.
+* **Logs**: enables or disables logging. **By default nothing is written
   anywhere.** With logs ON, files go to `/mnt/hbdebug/aap/logs/`; the next time the
   CIC boots with the install stick plugged in, they are copied to the stick
   (`AALOGS/`) and deleted from the CIC.
-* **Estado** (status): one line describing what is happening.
+* **AA:** (status): one line describing what is happening.
+
+Status texts follow the language set on the CIC (read from the HMI on each button
+press): Spanish, English, German, French, Italian, Dutch and Portuguese; any other
+language uses English. The fixed button labels are language-neutral.
 
 ## Installation
 

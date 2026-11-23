@@ -159,7 +159,9 @@ struct UiGuard {
     UiGuard() : locked(0) { if (g_ui_ready && pthread_self() != g_hmi_tid) { pthread_mutex_lock(g_ui_mtx); locked = 1; } }
     ~UiGuard() { if (locked) pthread_mutex_unlock(g_ui_mtx); }
 };
-static inline void ui(bmw::PluginApp* a, unsigned m, const char* v) { UiGuard g; a->updateModel(m, v ? v : ""); }
+#include "aap_i18n.h"
+/* Every model text goes out translated (Spanish texts are the keys, see aap_i18n.h). */
+static inline void ui(bmw::PluginApp* a, unsigned m, const char* v) { UiGuard g; v = tr(v); a->updateModel(m, v ? v : ""); }
 static int spawn(void* (*fn)(void*)) {
     int tid = 0; int rc = pthread_create(&tid, 0, fn, 0);
     if (rc == 0) pthread_detach(tid);
@@ -318,6 +320,16 @@ static int iba_signatures() {
             if (bytes[j] != kIbaAnchors[i].bytes[j]) { g_iba_sig_bad = (int)kIbaAnchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
     }
     return 1;
+}
+/* HMI thread: (re)read the CIC language so the next texts follow it. Only after
+ * the HmiMain signature check, the proxy/getter addresses are C1A-specific. */
+static void lang_refresh() {
+    if (pthread_self() != g_hmi_tid || !iba_signatures()) return;
+    int raw = 0;
+    if (!aap_lang_read(&raw)) { if (!g_lang_set) alog("CIC language not available yet"); return; }
+    int l = aap_lang_from_cic(raw);
+    if (!g_lang_set || raw != g_lang_raw) { g_lang_raw = raw; alog_val("CIC language", raw); }
+    g_lang = l; g_lang_set = 1;
 }
 static int iba_list(void* proxy, unsigned offset, void* cb, int property = 0) {
     typedef int (*AddListener)(void*, void*, void*, unsigned);
@@ -862,10 +874,10 @@ static int live_video_ready() {
     return g_ring[7] > 0 && g_ring[8] != g_ring_base;
 }
 static void status_show(bmw::PluginApp* app, const char* aa) {
-    char line[200], v[160];
+    char line[400], v[160], stage[160];
     pthread_mutex_lock(g_auto_mtx); copy_str(v, g_auto_text, sizeof v); pthread_mutex_unlock(g_auto_mtx);
-    unsigned n = put_str(line, 0, aa ? aa : "");
-    if (v[0] && !str_eq(v, "Reproductor iniciado.")) { n = put_str(line, n, " | "); n = put_str(line, n, v); }
+    unsigned n = put_str(line, 0, aa ? tr_stage(aa, stage, sizeof stage) : "");
+    if (v[0] && !str_eq(v, "Reproductor iniciado.")) { n = put_str(line, n, " | "); n = put_str(line, n, tr(v)); }
     line[n] = 0;
     ui(app, MODEL_STATUS, line);
 }
@@ -897,6 +909,7 @@ static void* aa_poll_thread(void*) {
 }
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
+    lang_refresh();
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
@@ -931,6 +944,7 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
 static void logs_show(bmw::PluginApp* app) { ui(app, MODEL_LOGS, g_logs ? "ON (" AAP_LOGDIR ")" : "OFF"); }
 static bool onLogs(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
+    lang_refresh();
     if (g_logs) { unlink(AAP_LOGS_ON); g_logs = 0; }
     else {
         mkdir(AAP_LOGDIR, 0755);
