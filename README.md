@@ -24,10 +24,14 @@ Known issues: occasional short audio cuts or video freezes when the DSP is at 10
 
 ## Compatibility
 
-* **Only CIC HIGH with HmiMain 9283417A, i.e. CIC software version C1A** (tested on an E9x). The plugin calls
-  internal HmiMain functions at fixed addresses; before using them it compares their
-  code against signatures. If your HmiMain differs, the plugin touches nothing and
-  shows "HmiMain distinto: no compatible".
+* **Only CIC HIGH with CIC software version C1A.** The plugin calls internal HmiMain
+  functions at fixed addresses; before using them it compares their code against
+  signatures. Known HmiMain builds (`src/plugin/iba_profiles.h`):
+  * 9283417A, tested on an E9x (the addresses in the source are for this build);
+  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, tested on an E60 LCI.
+
+  If your HmiMain is another build, the plugin touches nothing and shows
+  "HmiMain distinto: no compatible"; see [Other HmiMain builds](#other-hmimain-builds).
 * DSP image `dvd_dm642.bin` of 2363004 bytes (the one shipped with that firmware).
   The installer checks the exact bytes before patching.
 * NBT / EVO / CIC MID are not supported.
@@ -151,6 +155,7 @@ your private key: do not publish it** (for example as a GitHub release).
 ```
 src/common/aap_paths.h        paths, switches and defaults (margins, geometry)
 src/plugin/                   HMI plugin (C++): UI, iDrive, native video route, start-up
+src/plugin/iba_profiles.h     address tables for HmiMain builds other than 9283417A
 src/libcicaa/                 Android Auto protocol (USB/AOA, TLS, channels) -> shm rings
 src/cicaalive/                process feeding the DM642 DSP (H.264 + AAC) over dspipc
 src/dspload/                  DSP image patch/load, file compare, reboot
@@ -159,6 +164,7 @@ tools/build.py                builds everything and stages the USB stick
 patches/                      our patch to mbed TLS (applied to a copy at build time)
 third_party/mbedtls           mbed TLS 3.6.7 (git submodule)
 tools/encdec_sh.py            copie_scr.sh encoding expected by the CIC
+tools/hmi_profile.py          finds the plugin's addresses in another HmiMain build
 docs/ARQUITECTURA.md          how it works inside (Spanish)
 ```
 
@@ -172,6 +178,12 @@ word is `default` removes that setting. The plugin itself never creates them.
   Default `80 80 640 320 160 0 960 480`; `80 80 640 320 0 0 1280 480` stretches it
   to the full width.
 * `keymap.txt`: lines `cic_key android_key` (e.g. `12 22`).
+* `video.txt`: `margin_w margin_h [dpi]` asked from the phone (default `160 160 140`).
+  Android Auto draws its UI in a (800 - margin_w) x (480 - margin_h) area of the
+  800x480 stream; change `geom.txt` to match. Lower dpi = smaller UI, more fits.
+  Margins above `600 320` or dpi outside 60-400 are ignored (defaults kept).
+* `driver.txt`: `right` for right-hand drive (the Android Auto rail goes to the right);
+  default left.
 * `vlead_ms.txt`: video lead in ms (default 300; higher = fewer freezes, more latency).
   **Experimental:** `nopts` or `pts-1` sends video without timestamps once the DSP clock
   runs, so each frame is shown as soon as it is decoded (lowest latency, never skipped).
@@ -180,6 +192,40 @@ word is `default` removes that setting. The plugin itself never creates them.
   300 ms is the default compromise. Try 250-400 for your phone.
   An optional second word `dbg100` (e.g. `300 dbg100`) raises the DSP debug level to
   100 for the first 8 s of the clock (diagnostics only, needs logs ON).
+
+### Full screen with the right proportions
+
+The CIC screen is 1280x480 (8:3) but the default AA area is 640x320 (2:1), shown
+960x480 centred. To fill the screen without stretching, ask the phone for an 8:3
+area and scale it up. On an E60 LCI the CIC video scaler only accepts a source up to
+about 600 px wide (640 is cut off on the right; 600 and below fill the screen), so:
+
+* `video.txt`: `200 256 96` (600x224 area; dpi 96 so the AA rail and cards fit);
+* `geom.txt`: `100 128 600 224 0 0 1280 480`.
+
+It is softer (about 2.1x upscale) and lists show fewer rows, but it is edge to edge
+with round icons staying round. Over telnet you can try `geom.txt` values live:
+`echo "100 128 600 224 0 0 1280 480" > /mnt/hbdebug/aap/geom.txt`, then reconnect.
+
+## Other HmiMain builds
+
+Other builds of the C1A software contain the same HmiMain code moved by a few KB.
+To support one:
+
+1. Get its HmiMain. It is not a file on the running CIC: it lives in the second boot
+   image (`memifs2 -o 0x00740000` in `/etc/starter.cfg`). Over telnet, copy the raw
+   flash (read only): `cp /dev/fs0 /fs/usb0/fs0.img`. Never copy anything *to*
+   `/dev/fs0*`.
+2. `python tools/hmi_profile.py --extract fs0.img HmiMain`
+3. `python tools/hmi_profile.py HmiMain --name "E.. ..."`: it finds the 47 code
+   fingerprints (masking literal-pool addresses), resolves repeated ones with the
+   shift of their neighbours, moves the data addresses by the measured data shift and
+   checks every vtable by its C++ type name. It refuses to print an incomplete table.
+4. Add the output to `src/plugin/iba_profiles.h`, rename its `kXlat_X` / `kSigFix_X`
+   tables (e.g. `kXlatE61`, `kSigFixE61`) and add a line to `kIbaProfiles`.
+
+At run time the plugin uses the first profile whose fingerprints all match; with
+logs ON, `plugin.log` shows `HmiMain profile ...`.
 
 ## License
 

@@ -238,20 +238,61 @@ static unsigned long long mono_us(void)
     return (unsigned long long)t.tv_sec * 1000000ULL + (unsigned long long)t.tv_nsec / 1000ULL;
 }
 static void input_drain(aa_t *a);
+/* Optional settings (AAP_VIDEO_TXT, AAP_DRIVER_TXT), read at every connection. */
+static int read_small(const char *path, char *b, int size)
+{
+    int n, fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    n = read(fd, b, size - 1); close(fd);
+    if (n < 0) n = 0;
+    b[n] = 0; return n;
+}
+/* video.txt: "margin_w margin_h [dpi]". The phone draws its UI in
+ * (800 - margin_w) x (480 - margin_h); a different shape needs a matching geom.txt.
+ * Example for a full 1280x480 screen with the right proportions on a CIC whose video
+ * scaler only takes ~600 px wide sources (E60): video.txt "200 256 96" and
+ * geom.txt "100 128 600 224 0 0 1280 480".
+ * Margins above 600 x 320 (UI smaller than 200 x 160) or dpi outside 60..400 are
+ * ignored and the defaults kept. */
+static void video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
+{
+    char b[64]; unsigned v[3]; int k = 0; const char *p = b;
+    *mw = AAP_MARGIN_W; *mh = AAP_MARGIN_H; *dpi = AAP_DPI;
+    if (!read_small(AAP_VIDEO_TXT, b, sizeof b)) return;
+    while (*p && k < 3) {
+        while (*p && (*p < '0' || *p > '9')) ++p;
+        if (!*p) break;
+        v[k] = 0;
+        while (*p >= '0' && *p <= '9') { if (v[k] < 100000) v[k] = v[k] * 10 + (unsigned)(*p - '0'); ++p; }
+        ++k;
+    }
+    if (k >= 2 && v[0] <= 600 && v[1] <= 320) { *mw = v[0]; *mh = v[1]; }
+    if (k >= 3 && v[2] >= 60 && v[2] <= 400) *dpi = v[2];
+}
+/* driver.txt: "right" for right-hand drive; anything else (or no file) = left. */
+static int driver_right(void)
+{
+    char b[16]; const char *p = b;
+    if (!read_small(AAP_DRIVER_TXT, b, sizeof b)) return 0;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    return *p == 'r' || *p == 'R';
+}
 static int send_sd_response(aa_t *a)
 {
     pb_t sd, ch, sub, cfg, item;
+    unsigned mw, mh, dpi; int rhd = driver_right();
     memset(&sd, 0, sizeof sd);
     /* channel 2: sensors DRIVING_STATUS(13) + NIGHT_DATA(10) */
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 13); pb_msg(&sub, 1, &item);
     memset(&item, 0, sizeof item); pb_u(&item, 1, 10); pb_msg(&sub, 1, &item);
     pb_u(&ch, 1, CH_SENSOR); pb_msg(&ch, 2, &sub); pb_msg(&sd, 1, &ch);
-    /* channel 3: video H.264 800x480, 30 fps (v19), dpi 140 */
+    /* channel 3: video H.264 800x480, 30 fps (v19), margins and dpi from video.txt */
+    video_cfg(&mw, &mh, &dpi);
     memset(&ch, 0, sizeof ch); memset(&sub, 0, sizeof sub); memset(&cfg, 0, sizeof cfg);
     /* v19: field 2 frame_rate 2 = 30 fps (1 = 60 fps, what v13-v18 requested). */
-    /* v47: margin_width (default 80, file margin_w.txt overrides): DSP shows only 720 px. */
-    pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, AAP_MARGIN_W); pb_u(&cfg, 4, AAP_MARGIN_H); pb_u(&cfg, 5, 140);
+    /* margins/dpi: AAP_MARGIN_W/H and AAP_DPI by default, video.txt overrides (video_cfg). */
+    pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, mw); pb_u(&cfg, 4, mh); pb_u(&cfg, 5, dpi);
     pb_u(&sub, 1, 3 /* VIDEO */); pb_msg(&sub, 4, &cfg); pb_u(&sub, 5, 1);
     pb_u(&ch, 1, CH_VIDEO); pb_msg(&ch, 3, &sub); pb_msg(&sd, 1, &ch);
     /* channel 1: input - rotary/DPAD keycodes, touch 800x480 */
@@ -265,7 +306,9 @@ static int send_sd_response(aa_t *a)
     pb_str(&sd, 3, "BMW CIC");        /* car_model */
     pb_str(&sd, 4, "2010");           /* car_year */
     pb_str(&sd, 5, "0000000001");     /* car_serial */
-    pb_u(&sd, 6, 1);                  /* left_hand_drive */
+    /* driver_position (current AA protocol): 0 = left, 1 = right. Phones read the old
+     * value 1 ("left_hand_drive = true") as RIGHT and put the rail on the wrong side. */
+    pb_u(&sd, 6, rhd ? 1 : 0);
     pb_str(&sd, 7, "CIC lab");        /* headunit_manufacturer */
     pb_str(&sd, 8, "CIC HIGH");       /* headunit_model */
     pb_str(&sd, 9, "1");              /* sw_build */
@@ -276,6 +319,7 @@ static int send_sd_response(aa_t *a)
         a->lg("AA SERVICE_DISCOVERY_RESPONSE send failed");return -1;
     }
     a->lg("AA tx SERVICE_DISCOVERY_RESPONSE %u bytes (input/sensor/video + %s%sspeech/system + mic descriptor; capture unavailable)", (unsigned)sd.n, g_usb_media ? (g_aac ? "AAC-LC media(v56)/" : "PCM media/") : "", "PCM ");
+    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left");
     a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (usb_media.off): phone uses Bluetooth A2DP");
     return 0;
 }

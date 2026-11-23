@@ -14,7 +14,8 @@
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
  *
  * Private HmiMain ABI (fixed addresses) is checked against code signatures before
- * any call; on mismatch nothing is touched. Native HMI services are only used on
+ * any call; on mismatch nothing is touched. Addresses are written for the E9x build
+ * and translated for other known builds (iba_profiles.h). Native HMI services are only used on
  * the HMI ProcUnit thread (marshalled through the HMI executor). */
 namespace bmw {
 class IDispatcher;
@@ -260,6 +261,35 @@ static bool onAaBack(void* obj, const bmw::Parcel&) {
 #include "iba_state.h"
 #include "iba_firmware.h"
 #include "iba_marshal.h"
+#include "iba_profiles.h"
+/* HmiMain build profile (iba_profiles.h). 0 until iba_profile_select() found one;
+ * until then iba_a() returns the E9x address unchanged. */
+static const IbaProfile* g_iba_profile = 0;
+static int g_iba_profile_done = 0;
+static unsigned long iba_xlat(const IbaProfile* p, unsigned long a) {
+    for (unsigned i = 0; p && i < p->nxlat; ++i) if (p->xlat[i].from == a) return p->xlat[i].to;
+    return a;
+}
+static unsigned long iba_a(unsigned long a) { return iba_xlat(g_iba_profile, a); }
+static int iba_sig_ok(const IbaProfile* p, unsigned long a, const unsigned char* bytes) {
+    for (unsigned i = 0; i < p->nfix; ++i) if (p->fix[i].from == a) { bytes = p->fix[i].bytes; break; }
+    const unsigned char* code = (const unsigned char*)iba_xlat(p, a);
+    for (unsigned j = 0; j < 32; ++j) if (code[j] != bytes[j]) return 0;
+    return 1;
+}
+/* First profile whose anchors and marshal fingerprints all match the running HmiMain. */
+static const IbaProfile* iba_profile_select() {
+    if (g_iba_profile_done) return g_iba_profile;
+    g_iba_profile_done = 1;
+    for (unsigned p = 0; p < IBA_N(kIbaProfiles); ++p) {
+        const IbaProfile* pr = &kIbaProfiles[p];
+        int bad = 0;
+        for (unsigned i = 0; !bad && i < IBA_N(kIbaAnchors); ++i) bad = !iba_sig_ok(pr, kIbaAnchors[i].address, kIbaAnchors[i].bytes);
+        for (unsigned i = 0; !bad && i < IBA_N(kIbaMarshalSigs); ++i) bad = !iba_sig_ok(pr, kIbaMarshalSigs[i].address, kIbaMarshalSigs[i].bytes);
+        if (!bad) { g_iba_profile = pr; return pr; }
+    }
+    return 0;
+}
 static int auto_busy_control();
 static void auto_tick(bmw::PluginApp*);
 static int auto_is_shutdown();
@@ -312,17 +342,21 @@ static void iba_stop_ack(void*, unsigned short h) { iba_event(IBA_STOP, h, 1); }
 static void iba_stop_err(void*, unsigned short h, unsigned char) { iba_event(IBA_STOP, h, 0); }
 static void iba_deck(void*, void*) {}
 static int iba_signatures() {
-    for (unsigned i = 0; i < sizeof(kIbaAnchors) / sizeof(kIbaAnchors[0]); ++i) {
-        const unsigned char* bytes = (const unsigned char*)kIbaAnchors[i].address;
-        for (unsigned j = 0; j < 32; ++j)
-            if (bytes[j] != kIbaAnchors[i].bytes[j]) { g_iba_sig_bad = (int)kIbaAnchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
+    const IbaProfile* pr = iba_profile_select();
+    if (!pr) {   /* report the first anchor that differs from the E9x build */
+        for (unsigned i = 0; i < IBA_N(kIbaAnchors); ++i)
+            if (!iba_sig_ok(&kIbaProfiles[0], kIbaAnchors[i].address, kIbaAnchors[i].bytes)) {
+                g_iba_sig_bad = (int)kIbaAnchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); break;
+            }
+        return 0;
     }
+    if (g_logs) { char b[112]; unsigned n = put_str(b, 0, "HmiMain profile "); n = put_str(b, n, pr->name); b[n] = 0; alog(b); }
     return 1;
 }
 static int iba_list(void* proxy, unsigned offset, void* cb, int property = 0) {
     typedef int (*AddListener)(void*, void*, void*, unsigned);
     if (!iba_before("register listener")) return 0;
-    return ((AddListener)(property ? 0x082c2268UL : 0x082c2148UL))(iba_off(proxy, offset), g_iba_target, cb, 0);
+    return ((AddListener)(property ? iba_a(0x082c2268UL) : iba_a(0x082c2148UL)))(iba_off(proxy, offset), g_iba_target, cb, 0);
 }
 static int iba_check(bmw::PluginApp* app) {
     if (g_iba_checked) return g_iba.ready;
@@ -332,17 +366,17 @@ static int iba_check(bmw::PluginApp* app) {
     if (!iba_signatures()) { iba_ui(app, "HmiMain distinto: no compatible"); return 0; }
     typedef void* (*Factory)(unsigned);
     typedef void (*Ctor)(void*);
-    ((Ctor)0x08201c58UL)(g_iba_target); g_iba_target_live = 1;
-    g_iba_cm = ((Factory)0x08b9d1b0UL)(0);
-    g_iba_aux = ((Factory)0x08b64d18UL)(38);
-    g_iba_vcm = ((Factory)0x08ce0fc4UL)(1);
-    g_iba_sink = ((Factory)0x08ce328cUL)(1);
+    ((Ctor)iba_a(0x08201c58UL))(g_iba_target); g_iba_target_live = 1;
+    g_iba_cm = ((Factory)iba_a(0x08b9d1b0UL))(0);
+    g_iba_aux = ((Factory)iba_a(0x08b64d18UL))(38);
+    g_iba_vcm = ((Factory)iba_a(0x08ce0fc4UL))(1);
+    g_iba_sink = ((Factory)iba_a(0x08ce328cUL))(1);
     if (!(g_iba_cm && g_iba_aux && g_iba_vcm && g_iba_sink)) { iba_ui(app, "Faltan servicios de video del CIC"); return 0; }
-    if (*(unsigned long*)iba_off(g_iba_cm, 0x6c8) != 0x0920cbbcUL ||
-        *(unsigned long*)iba_off(g_iba_vcm, 0x6c8) != 0x092276c0UL ||
-        *(unsigned long*)iba_off(g_iba_vcm, 0x760) != 0x0922767cUL ||
-        *(unsigned long*)iba_off(g_iba_aux, 0x1de4) != kIbaSelectVtable ||
-        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != kIbaStartVtable) { iba_ui(app, "Layout de servicios distinto"); return 0; }
+    if (*(unsigned long*)iba_off(g_iba_cm, 0x6c8) != iba_a(0x0920cbbcUL) ||
+        *(unsigned long*)iba_off(g_iba_vcm, 0x6c8) != iba_a(0x092276c0UL) ||
+        *(unsigned long*)iba_off(g_iba_vcm, 0x760) != iba_a(0x0922767cUL) ||
+        *(unsigned long*)iba_off(g_iba_aux, 0x1de4) != iba_a(kIbaSelectVtable) ||
+        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != iba_a(kIbaStartVtable)) { iba_ui(app, "Layout de servicios distinto"); return 0; }
 #define IBA_LIST(p, o, f) if (!iba_list(p, o, (void*)&f)) { iba_ui(app, "No se pudo registrar listener"); return 0; }
     IBA_LIST(g_iba_cm, 0x754, iba_audio_ack)
     IBA_LIST(g_iba_cm, 0x6f4, iba_audio_err)
@@ -370,24 +404,24 @@ static int iba_check(bmw::PluginApp* app) {
 }
 static unsigned iba_handle() {
     typedef unsigned short (*Role)();
-    unsigned h = ((((Role)0x08d6ebbcUL)() & 0xffffU) << 4) | 0xf000U;
+    unsigned h = ((((Role)iba_a(0x08d6ebbcUL))() & 0xffffU) << 4) | 0xf000U;
     return (h + (g_iba_sequence++ & 15U)) & 0xffffU;
 }
 static int iba_idle_sink() {
     typedef int (*Get)(void*, int*); int source = -1;
     if (!iba_before("read current video source")) return 0;
     typedef int (*ValidSource)(void*);
-    if (!((ValidSource)0x08d1ae64UL)(iba_off(g_iba_sink, 0xc80))) return 0;
-    int rc = ((Get)0x08ce4890UL)(iba_off(g_iba_sink, 0xc80), &source);
+    if (!((ValidSource)iba_a(0x08d1ae64UL))(iba_off(g_iba_sink, 0xc80))) return 0;
+    int rc = ((Get)iba_a(0x08ce4890UL))(iba_off(g_iba_sink, 0xc80), &source);
     alog_val("current source", source);
     int own = g_iba.result[IBA_CONNECT] == 1;
     if (!rc || (source != 0 && !(own && source == 8))) { iba_ui(g_app, "Pantalla de video ocupada por otra fuente"); return 0; }
     typedef int (*Valid)(void*);
     typedef int (*Table)(void*, int, int*);
     void* table = iba_off(g_iba_vcm, 0x7f8);
-    if (!((Valid)0x08d1ae64UL)(table)) return 0;
+    if (!((Valid)iba_a(0x08d1ae64UL))(table)) return 0;
     int connected = -1;
-    if (!((Table)0x08ce160cUL)(table, 1, &connected) || connected != (own ? 8 : 0)) {
+    if (!((Table)iba_a(0x08ce160cUL))(table, 1, &connected) || connected != (own ? 8 : 0)) {
         /* car: connect ACK but table stays 0 until video starts; only that case continues */
         if (!(own && connected == 0 && source == 0)) { iba_ui(g_app, "Tabla de video distinta"); return 0; }
     }
@@ -396,7 +430,7 @@ static int iba_idle_sink() {
 }
 static int iba_rect_valid(unsigned offset) {
     typedef int (*Valid)(void*);
-    return ((Valid)0x08d1ae64UL)(iba_off(g_iba_sink, offset)) != 0;
+    return ((Valid)iba_a(0x08d1ae64UL))(iba_off(g_iba_sink, offset)) != 0;
 }
 static int iba_snapshot_rect() {
     if (!iba_before("snapshot rectangles")) return 0;
@@ -428,27 +462,27 @@ static int iba_apply_geometry(bmw::PluginApp*) {
      * native PAL geometry is the fallback if the scaler refuses the AA rectangle. */
     typedef void* (*Factory)(); typedef int (*Geometry)(void*, short, short, short, short*);
     if (!iba_before("geometry")) return 0;
-    void* defs = ((Factory)0x08938a00UL)(); if (!defs) return 0;
+    void* defs = ((Factory)iba_a(0x08938a00UL))(); if (!defs) return 0;
     short native[2][4];
-    int ok = ((Geometry)0x08938b60UL)(defs, 1, 0, 0, native[0]) && ((Geometry)0x08938b60UL)(defs, 2, 0, 0, native[1]);
+    int ok = ((Geometry)iba_a(0x08938b60UL))(defs, 1, 0, 0, native[0]) && ((Geometry)iba_a(0x08938b60UL))(defs, 2, 0, 0, native[1]);
     short g[8]; geom_load(g);
     typedef int (*Rect)(void*, short, short, short, short);
-    int okin = ((Rect)0x08ce4408UL)(iba_off(g_iba_sink, 0xb78), g[0], g[1], g[2], g[3]);
-    int okout = okin && ((Rect)0x08ce464cUL)(iba_off(g_iba_sink, 0xbfc), g[4], g[5], g[6], g[7]);
+    int okin = ((Rect)iba_a(0x08ce4408UL))(iba_off(g_iba_sink, 0xb78), g[0], g[1], g[2], g[3]);
+    int okout = okin && ((Rect)iba_a(0x08ce464cUL))(iba_off(g_iba_sink, 0xbfc), g[4], g[5], g[6], g[7]);
     if (!okout) {
         alog("AA geometry refused -> native DVD window");
         if (!ok) return 0;
-        if (!((Rect)0x08ce4408UL)(iba_off(g_iba_sink, 0xb78), native[0][0], native[0][1], native[0][2], native[0][3])) return 0;
-        if (!((Rect)0x08ce464cUL)(iba_off(g_iba_sink, 0xbfc), native[1][0], native[1][1], native[1][2], native[1][3])) return 0;
+        if (!((Rect)iba_a(0x08ce4408UL))(iba_off(g_iba_sink, 0xb78), native[0][0], native[0][1], native[0][2], native[0][3])) return 0;
+        if (!((Rect)iba_a(0x08ce464cUL))(iba_off(g_iba_sink, 0xbfc), native[1][0], native[1][1], native[1][2], native[1][3])) return 0;
     }
     return 1;
 }
 static int iba_route_ours(bmw::PluginApp* app) {
     typedef int (*Valid)(void*); typedef int (*Get)(void*, int*); typedef int (*Table)(void*, int, int*);
     void* src = iba_off(g_iba_sink, 0xc80); void* table = iba_off(g_iba_vcm, 0x7f8);
-    if (!((Valid)0x08d1ae64UL)(src) || !((Valid)0x08d1ae64UL)(table)) { iba_ui(app, "Esperando ruta de video"); return 0; }
+    if (!((Valid)iba_a(0x08d1ae64UL))(src) || !((Valid)iba_a(0x08d1ae64UL))(table)) { iba_ui(app, "Esperando ruta de video"); return 0; }
     int current = -1, connection = -1;
-    if (!((Get)0x08ce4890UL)(src, &current) || !((Table)0x08ce160cUL)(table, 1, &connection)) return 0;
+    if (!((Get)iba_a(0x08ce4890UL))(src, &current) || !((Table)iba_a(0x08ce160cUL))(table, 1, &connection)) return 0;
     int own_table_lag = connection == 0 && g_iba.result[IBA_CONNECT] == 1;
     if ((current != 0 && current != 8) || (connection != 8 && !own_table_lag)) { iba_ui(app, "Ruta de video cambiada por otro cliente"); return 0; }
     return 1;
@@ -464,12 +498,12 @@ static int iba_restore_sink(bmw::PluginApp* app) {
         g_iba_restore_sent = 1;
         for (unsigned i = 0; i < 2; ++i) {
             short* r = g_iba_rect[i];
-            if (!((Rect)(i ? 0x08ce464cUL : 0x08ce4408UL))(iba_off(g_iba_sink, i ? 0xbfc : 0xb78), r[0], r[1], r[2], r[3])) { g_iba_restore_failed = 1; return 0; }
+            if (!((Rect)(i ? iba_a(0x08ce464cUL) : iba_a(0x08ce4408UL)))(iba_off(g_iba_sink, i ? 0xbfc : 0xb78), r[0], r[1], r[2], r[3])) { g_iba_restore_failed = 1; return 0; }
         }
-        if (!((SetSource)0x08ce48e0UL)(iba_off(g_iba_sink, 0xc80), g_iba_previous_source, 0)) { g_iba_restore_failed = 1; return 0; }
+        if (!((SetSource)iba_a(0x08ce48e0UL))(iba_off(g_iba_sink, 0xc80), g_iba_previous_source, 0)) { g_iba_restore_failed = 1; return 0; }
     }
     typedef int (*Get)(void*, int*); int source = -1;
-    int rc = ((Get)0x08ce4890UL)(iba_off(g_iba_sink, 0xc80), &source);
+    int rc = ((Get)iba_a(0x08ce4890UL))(iba_off(g_iba_sink, 0xc80), &source);
     if (!rc || source != g_iba_previous_source || !iba_rect_valid(0xb78) || !iba_rect_valid(0xbfc)) return 0;
     for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j)
         if (g_iba_rect[i][j] != ((short*)iba_off(g_iba_sink, (i ? 0xbfc : 0xb78) + 124))[j]) return 0;
@@ -540,7 +574,7 @@ static void menu_hide_for_video() {
     if (g_iba_mgr) {
         int i = menu_find_layer();
         unsigned long* vt = *(unsigned long**)g_iba_mgr;
-        if (i >= 0 && vt[14] == 0x08af0210UL && vt[15] == 0x08af0278UL) {
+        if (i >= 0 && vt[14] == iba_a(0x08af0210UL) && vt[15] == iba_a(0x08af0278UL)) {
             typedef int (*GetAlpha)(void*, unsigned, unsigned char*);
             typedef void (*SetAlpha)(void*, unsigned, unsigned);
             unsigned char a = 255; if (((GetAlpha)vt[15])(g_iba_mgr, (unsigned)i, &a)) g_menu_saved = a;
@@ -583,25 +617,25 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
         if (!iba_snapshot_rect()) return;
     }
     if (op == IBA_SHOW) {
-        if (*(unsigned long*)0x091fda28UL != 0) { g_iba.failed = 1; iba_ui(app, "Capa de video ocupada por otro cliente"); return; }
+        if (*(unsigned long*)iba_a(0x091fda28UL) != 0) { g_iba.failed = 1; iba_ui(app, "Capa de video ocupada por otro cliente"); return; }
         if (!iba_route_ours(app)) return;
         if (!live_prepare(app)) return;
         if (!iba_apply_geometry(app)) return;
         if (!iba_before("show layer26")) return;
-        typedef void* (*Draw)(); void* draw = ((Draw)0x08ae34e4UL)();
+        typedef void* (*Draw)(); void* draw = ((Draw)iba_a(0x08ae34e4UL))();
         if (!draw) { g_iba.failed = 1; return; }
         unsigned long* vt = *(unsigned long**)draw;
-        if (vt[20] != kIbaLayerManagerGetter) { g_iba.failed = 1; return; }
+        if (vt[20] != iba_a(kIbaLayerManagerGetter)) { g_iba.failed = 1; return; }
         typedef void* (*Manager)(void*); g_iba_mgr = ((Manager)vt[20])(draw);
         if (!g_iba_mgr) { g_iba.failed = 1; return; }
         vt = *(unsigned long**)g_iba_mgr;
-        if (vt[14] != 0x08af0210UL || vt[15] != 0x08af0278UL) { g_iba.failed = 1; return; }
+        if (vt[14] != iba_a(0x08af0210UL) || vt[15] != iba_a(0x08af0278UL)) { g_iba.failed = 1; return; }
         typedef int (*GetAlpha)(void*, unsigned, unsigned char*);
         if (!((GetAlpha)vt[15])(g_iba_mgr, 26, &g_iba_alpha)) { g_iba.failed = 1; return; }
         g_iba.issue(op, 0, mono_ms());
         typedef void (*SetAlpha)(void*, unsigned, unsigned);
         ((SetAlpha)vt[14])(g_iba_mgr, 26, 255);
-        typedef void (*Enable)(int); ((Enable)kLayerHelper)(1); g_iba_layer = 1;
+        typedef void (*Enable)(int); ((Enable)iba_a(kLayerHelper))(1); g_iba_layer = 1;
         g_iba.ack(op, 0, 1);
         menu_hide_for_video();
         return;
@@ -611,7 +645,7 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
     if (op == IBA_STOP && g_iba_layer) {
         if (!iba_before("hide layer26")) return;
         menu_restore();
-        typedef void (*Enable)(int); ((Enable)kLayerHelper)(0); g_iba_layer = 0;
+        typedef void (*Enable)(int); ((Enable)iba_a(kLayerHelper))(0); g_iba_layer = 0;
         unsigned long* vt = *(unsigned long**)g_iba_mgr;
         typedef void (*SetAlpha)(void*, unsigned, unsigned);
         ((SetAlpha)vt[14])(g_iba_mgr, 26, g_iba_alpha);
@@ -624,16 +658,16 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
     typedef int (*Connection)(void*, unsigned short, unsigned short);
     typedef int (*VideoConnection)(void*, unsigned short, int, int);
     typedef int (*SinkRun)(void*, unsigned short);
-    if (op == IBA_AUDIO) rc = ((Connection)0x08b9d308UL)(iba_off(g_iba_cm, 0x6c8), (unsigned short)h, 0xc4);
-    else if (op == IBA_RELEASE) rc = ((Connection)0x08b9d460UL)(iba_off(g_iba_cm, 0x760), (unsigned short)h, 0xc4);
-    else if (op == IBA_CONNECT) rc = ((VideoConnection)0x08ce111cUL)(iba_off(g_iba_vcm, 0x6c8), (unsigned short)h, 8, 1);
-    else if (op == IBA_DISCONNECT) rc = ((VideoConnection)0x08ce135cUL)(iba_off(g_iba_vcm, 0x760), (unsigned short)h, 8, 1);
+    if (op == IBA_AUDIO) rc = ((Connection)iba_a(0x08b9d308UL))(iba_off(g_iba_cm, 0x6c8), (unsigned short)h, 0xc4);
+    else if (op == IBA_RELEASE) rc = ((Connection)iba_a(0x08b9d460UL))(iba_off(g_iba_cm, 0x760), (unsigned short)h, 0xc4);
+    else if (op == IBA_CONNECT) rc = ((VideoConnection)iba_a(0x08ce111cUL))(iba_off(g_iba_vcm, 0x6c8), (unsigned short)h, 8, 1);
+    else if (op == IBA_DISCONNECT) rc = ((VideoConnection)iba_a(0x08ce135cUL))(iba_off(g_iba_vcm, 0x760), (unsigned short)h, 8, 1);
     else if (op == IBA_START) {
         typedef int (*SetSource)(void*, int, unsigned char);
         g_iba_source_changed = 1;
-        rc = ((SetSource)0x08ce48e0UL)(iba_off(g_iba_sink, 0xc80), 8, 0);
-        if (rc) rc = ((SinkRun)0x08ce40e4UL)(iba_off(g_iba_sink, 0xa48), (unsigned short)h);
-    } else if (op == IBA_STOP) rc = ((SinkRun)0x08ce42c0UL)(iba_off(g_iba_sink, 0xae0), (unsigned short)h);
+        rc = ((SetSource)iba_a(0x08ce48e0UL))(iba_off(g_iba_sink, 0xc80), 8, 0);
+        if (rc) rc = ((SinkRun)iba_a(0x08ce40e4UL))(iba_off(g_iba_sink, 0xa48), (unsigned short)h);
+    } else if (op == IBA_STOP) rc = ((SinkRun)iba_a(0x08ce42c0UL))(iba_off(g_iba_sink, 0xae0), (unsigned short)h);
     alog_val(kIbaNames[op], rc);
     if (!rc) g_iba.ack(op, h, 0);
 }
@@ -657,21 +691,18 @@ static unsigned long g_iba_run_vt[12];
 static const unsigned long kExecVptr = 0x0922d2b8UL, kExecLoop = 0x08d5fce4UL;
 typedef void* (*IbaCurrentPU)();
 static void iba_capture_pu() {
-    for (unsigned i = 0; i < sizeof(kIbaMarshalSigs) / sizeof(kIbaMarshalSigs[0]); ++i) {
-        const unsigned char* b = (const unsigned char*)kIbaMarshalSigs[i].address;
-        for (unsigned j = 0; j < 32; ++j) if (b[j] != kIbaMarshalSigs[i].bytes[j]) return;
-    }
-    void* pu = ((IbaCurrentPU)0x08d5c528UL)();
+    if (!iba_profile_select()) return;
+    void* pu = ((IbaCurrentPU)iba_a(0x08d5c528UL))();
     if (!pu) return;
     unsigned long* ex = *(unsigned long**)iba_off(pu, 0x3c8);
-    if ((unsigned long)ex != kExecVptr || ex[5] != kExecLoop) return;
+    if ((unsigned long)ex != iba_a(kExecVptr) || ex[5] != iba_a(kExecLoop)) return;
     g_iba_pu = pu; g_iba_marshal_ok = 1;
 }
 static void iba_cb(void* epoch, int, void* runnable) {
     pthread_mutex_lock(g_iba_queue_mtx);
     if ((unsigned long)epoch != g_iba_epoch || auto_is_shutdown()) { g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx); return; }
     pthread_mutex_unlock(g_iba_queue_mtx);
-    int pu_ok = pthread_self() == g_hmi_tid && runnable == (void*)g_iba_run && ((IbaCurrentPU)0x08d5c528UL)() == g_iba_pu;
+    int pu_ok = pthread_self() == g_hmi_tid && runnable == (void*)g_iba_run && ((IbaCurrentPU)iba_a(0x08d5c528UL))() == g_iba_pu;
     if (!pu_ok) { g_iba_msg = "Hilo HMI no verificado"; auto_fail_control("Hilo del CIC no verificado."); }
     else { g_iba_tid = pthread_self(); auto_tick(g_app); }
     pthread_mutex_lock(g_iba_queue_mtx); g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx);
@@ -685,7 +716,7 @@ static int iba_queue() {
     g_iba_run[0] = (unsigned long)g_iba_run_vt;
     g_iba_pending = 1;
     typedef int (*Add)(void*, void*, void*, int, void*);
-    int id = ((Add)0x08d5f9a4UL)(iba_off(g_iba_pu, 0x3c8), (void*)g_iba_epoch, (void*)&iba_cb, 0, (void*)g_iba_run);
+    int id = ((Add)iba_a(0x08d5f9a4UL))(iba_off(g_iba_pu, 0x3c8), (void*)g_iba_epoch, (void*)&iba_cb, 0, (void*)g_iba_run);
     if (id == -1) g_iba_pending = 0;
     pthread_mutex_unlock(g_iba_queue_mtx);
     return id != -1;
@@ -966,7 +997,7 @@ extern "C" void aap_destroy(void* app) {
     if (!app) return;
     auto_runtime_shutdown();
     if (g_iba_target_live && pthread_self() == g_iba_tid) {
-        typedef void (*Dtor)(void*); ((Dtor)0x08d6ed6cUL)(g_iba_target); g_iba_target_live = 0;
+        typedef void (*Dtor)(void*); ((Dtor)iba_a(0x08d6ed6cUL))(g_iba_target); g_iba_target_live = 0;
     }
     g_app = 0;
     typedef void (*DeletingDestructor)(void*);

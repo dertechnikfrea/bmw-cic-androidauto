@@ -18,10 +18,13 @@
 #define AAP_GEOM_TXT  AAP_DIR "/geom.txt"           /* "sx sy sw sh dx dy dw dh" */
 #define AAP_KEYMAP    AAP_DIR "/keymap.txt"         /* lines "cic_key android_key" */
 #define AAP_VLEAD_TXT AAP_DIR "/vlead_ms.txt"       /* video lead in ms */
+#define AAP_VIDEO_TXT AAP_DIR "/video.txt"          /* "margin_w margin_h [dpi]" asked from the phone */
+#define AAP_DRIVER_TXT AAP_DIR "/driver.txt"        /* "left" (default) or "right": driver seat */
 /* Video layout requested from the phone: 800x480 stream with these margins
  * (AA draws its UI in the remaining 640x320 area), shown 960x480 centred. */
 #define AAP_MARGIN_W  160
 #define AAP_MARGIN_H  160
+#define AAP_DPI       140
 #define AAP_GEOM      {80, 80, 640, 320, 160, 0, 960, 480}
 #define AAP_VLEAD_MS  300
 #endif
