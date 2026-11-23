@@ -260,44 +260,50 @@ static bool onAaBack(void* obj, const bmw::Parcel&) {
 #include "iba_state.h"
 #include "iba_firmware.h"
 #include "iba_marshal.h"
-#include "iba_fw76617.h"
+#include "iba_fw_ports.h"
 /* Supported HmiMain builds. All addresses in this file are written as C1A (9283417A)
- * addresses; HM() rebases them onto the running build. Rev 76617 (CIC_L6_1107 Build 46)
- * keeps the same code with its sections shifted (see tools/port_76617.py). */
-enum { HMI_FW_UNKNOWN = 0, HMI_FW_C1A = 1, HMI_FW_76617 = 2, HMI_FW_NONE = -1 };
-static int g_hmi_fw = HMI_FW_UNKNOWN;
-static int fw_match(const IbaAnchor* a, unsigned n) {
-    for (unsigned i = 0; i < n; ++i) {
-        const unsigned char* b = (const unsigned char*)a[i].address;
-        for (unsigned j = 0; j < 32; ++j) if (b[j] != a[i].bytes[j]) return 0;
-    }
-    return 1;
-}
-static int fw_match_m(const IbaMarshalSig* a, unsigned n) {
-    for (unsigned i = 0; i < n; ++i) {
-        const unsigned char* b = (const unsigned char*)a[i].address;
-        for (unsigned j = 0; j < 32; ++j) if (b[j] != a[i].bytes[j]) return 0;
-    }
-    return 1;
-}
+ * addresses; HM() rebases them onto the running build. The other builds keep the
+ * same code with sections shifted by region (see tools/port_fw.py). */
+struct FwRange { unsigned long lo, hi; long delta; };
+static const FwRange kFwMap76617[] = {
+    {0x09000000UL, 0x0a000000UL, 0x7dc}, {0x08ad0000UL, 0x09000000UL, 0x408},
+    {0x08930000UL, 0x08940000UL, 0x3fc}, {0x082b0000UL, 0x082d0000UL, 0xbc},
+    {0x08040000UL, 0x08210000UL, 0xa0}};
+static const FwRange kFwMap58135[] = {
+    {0x09000000UL, 0x0a000000UL, -0x116c}, {0x08ce4000UL, 0x09000000UL, -0xfe4},
+    {0x08ce0000UL, 0x08ce4000UL, -0xeac}, {0x08ad0000UL, 0x08ce0000UL, -0xe90},
+    {0x08930000UL, 0x08940000UL, -0xda0}, {0x082b0000UL, 0x082d0000UL, -0x138},
+    {0x08040000UL, 0x08210000UL, -0x120}};
 #define FW_N(t) (sizeof(t) / sizeof(t[0]))
-/* Checks only the first anchor of each table: enough to pick the build without reading
- * unrelated addresses; the full tables are checked later by iba_signatures(). */
-static int hmi_fw() {
-    if (g_hmi_fw == HMI_FW_UNKNOWN) {
-        if (fw_match(kIbaAnchors, 1)) g_hmi_fw = HMI_FW_C1A;
-        else if (fw_match(kIbaAnchors76617, 1)) g_hmi_fw = HMI_FW_76617;
-        else g_hmi_fw = HMI_FW_NONE;
+struct HmiFw {
+    const char* name; const IbaAnchor* anchors; unsigned n_anchors;
+    const IbaMarshalSig* marshal; unsigned n_marshal; const FwRange* map; unsigned n_map;
+};
+static const HmiFw kHmiFws[] = {
+    {"C1A", kIbaAnchors, FW_N(kIbaAnchors), kIbaMarshalSigs, FW_N(kIbaMarshalSigs), 0, 0},
+    {"Rev76617", kIbaAnchors76617, FW_N(kIbaAnchors76617), kIbaMarshalSigs76617, FW_N(kIbaMarshalSigs76617), kFwMap76617, FW_N(kFwMap76617)},
+    {"Rev58135", kIbaAnchors58135, FW_N(kIbaAnchors58135), kIbaMarshalSigs58135, FW_N(kIbaMarshalSigs58135), kFwMap58135, FW_N(kFwMap58135)}};
+static int g_hmi_fw = -2; /* -2 not checked, -1 unknown, else index in kHmiFws */
+static int sig_eq(unsigned long address, const unsigned char* bytes) {
+    const unsigned char* b = (const unsigned char*)address;
+    for (unsigned j = 0; j < 32; ++j) if (b[j] != bytes[j]) return 0;
+    return 1;
+}
+/* Picks the build from the first anchor of each table only; the full tables are
+ * checked by iba_signatures() and iba_capture_pu(). */
+static const HmiFw* hmi_fw() {
+    if (g_hmi_fw == -2) {
+        g_hmi_fw = -1;
+        for (unsigned i = 0; i < FW_N(kHmiFws); ++i)
+            if (sig_eq(kHmiFws[i].anchors[0].address, kHmiFws[i].anchors[0].bytes)) { g_hmi_fw = (int)i; break; }
     }
-    return g_hmi_fw;
+    return g_hmi_fw < 0 ? 0 : &kHmiFws[g_hmi_fw];
 }
 static unsigned long HM(unsigned long a) {
-    if (hmi_fw() != HMI_FW_76617) return a;
-    if (a >= 0x09000000UL) return a + 0x7dcUL;
-    if (a >= 0x08ad0000UL) return a + 0x408UL;
-    if (a >= 0x08930000UL && a < 0x08940000UL) return a + 0x3fcUL;
-    if (a >= 0x082b0000UL && a < 0x082d0000UL) return a + 0xbcUL;
-    if (a < 0x08210000UL) return a + 0xa0UL;
+    const HmiFw* fw = hmi_fw();
+    if (!fw || !fw->map) return a;
+    for (unsigned i = 0; i < fw->n_map; ++i)
+        if (a >= fw->map[i].lo && a < fw->map[i].hi) return (unsigned long)((long)a + fw->map[i].delta);
     return 0; /* not mapped: never reached for the addresses used here */
 }
 static int auto_busy_control();
@@ -352,12 +358,11 @@ static void iba_stop_ack(void*, unsigned short h) { iba_event(IBA_STOP, h, 1); }
 static void iba_stop_err(void*, unsigned short h, unsigned char) { iba_event(IBA_STOP, h, 0); }
 static void iba_deck(void*, void*) {}
 static int iba_signatures() {
-    const IbaAnchor* a = hmi_fw() == HMI_FW_76617 ? kIbaAnchors76617 : kIbaAnchors;
-    unsigned n = hmi_fw() == HMI_FW_76617 ? FW_N(kIbaAnchors76617) : FW_N(kIbaAnchors);
-    if (hmi_fw() == HMI_FW_NONE) { g_iba_sig_bad = (int)kIbaAnchors[0].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
-    for (unsigned i = 0; i < n; ++i)
-        if (!fw_match(&a[i], 1)) { g_iba_sig_bad = (int)a[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
-    alog_val("HMI_FW", hmi_fw());
+    const HmiFw* fw = hmi_fw();
+    if (!fw) { g_iba_sig_bad = (int)kIbaAnchors[0].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
+    for (unsigned i = 0; i < fw->n_anchors; ++i)
+        if (!sig_eq(fw->anchors[i].address, fw->anchors[i].bytes)) { g_iba_sig_bad = (int)fw->anchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
+    alog_val("HMI_FW", g_hmi_fw);
     return 1;
 }
 static int iba_list(void* proxy, unsigned offset, void* cb, int property = 0) {
@@ -698,9 +703,9 @@ static unsigned long g_iba_run_vt[12];
 static const unsigned long kExecVptr = 0x0922d2b8UL, kExecLoop = 0x08d5fce4UL;
 typedef void* (*IbaCurrentPU)();
 static void iba_capture_pu() {
-    if (hmi_fw() == HMI_FW_C1A) { if (!fw_match_m(kIbaMarshalSigs, FW_N(kIbaMarshalSigs))) return; }
-    else if (hmi_fw() == HMI_FW_76617) { if (!fw_match_m(kIbaMarshalSigs76617, FW_N(kIbaMarshalSigs76617))) return; }
-    else return;
+    const HmiFw* fw = hmi_fw();
+    if (!fw) return;
+    for (unsigned i = 0; i < fw->n_marshal; ++i) if (!sig_eq(fw->marshal[i].address, fw->marshal[i].bytes)) return;
     void* pu = ((IbaCurrentPU)HM(0x08d5c528UL))();
     if (!pu) return;
     unsigned long* ex = *(unsigned long**)iba_off(pu, 0x3c8);
