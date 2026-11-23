@@ -206,7 +206,7 @@ static int live_once(ring_hdr *r, uint32_t vlead)
     pid_t parent = getppid();
     d.h = d.dbg = d.cmd = d.strm = 0; d.have_mem = 0;
     d.buf_back = d.started = d.stopped = d.errors = d.fatal = 0; d.mra = 0;
-    g_clk = 0; g_afull = 0; g_resync = 0; g_apts = 0; g_aframes = 0;
+    g_clk = 0; g_afull = 0; g_resync = 0; g_apts = 0; g_aframes = 0; g_drain_since = 0;
     memset(g_ac, 0, sizeof g_ac);
     if (g_ar) { int c; for (c = 0; c < 3; c++) { g_ac[c].rpos = g_ar->wpos[c]; g_ac[c].gen = g_ar->gen[c]; } }
     r->rpos = r->wpos; r->want_idr = 1;
@@ -217,9 +217,15 @@ static int live_once(ring_hdr *r, uint32_t vlead)
         uint32_t rp, wp; ring_rec h; uint64_t now;
         if (getppid() != parent) { lg("parent gone -> exit"); break; }
         rp = r->rpos; wp = r->wpos; now = now_us();
-        if (g_resync) {                    /* v53: EVT_STREAM_ERROR (video, non fatal) -> resend header, wait IDR */
-            g_resync = 0; cfg_gen = 0; waiting_idr = 1; r->want_idr = 1; last_idr_req = now;
-            lg("STREAM ERROR -> resync: header + wait IDR (errors=%d)", d.errors);
+        if (g_resync) {                    /* fresh start / backlog watchdog (cicaalive.c) */
+            /* Header again and skip frames until an IDR, but do NOT ask for the IDR yet:
+               backlog_watch() requests it once the DSP has shown everything sent before
+               now, so the IDR does not queue up behind the old backlog. Fallback: the
+               periodic re-request below fires 2.8 s from now. */
+            g_resync = 0; cfg_gen = 0; waiting_idr = 1;
+            last_idr_req = now - 200000u;
+            g_drain_since = (uint32_t)now ? (uint32_t)now : 1u;
+            lg("RESYNC: drain backlog, IDR request delayed");
         }
         /* 1.0.1: debug level 10 is only needed to see the clock start (~11 msgs/s cost
            DSP cycles). 1 s after the clock runs, drop it to 1 (events/errors still arrive
@@ -276,7 +282,7 @@ static int live_once(ring_hdr *r, uint32_t vlead)
             if (frames == 0) { if (prop(121, 3, 0) || prop(9, 0, 0x8fa5) || prop(14, 0, 0)) { rc = 1; break; } }
             else if (g_vmode == 1 && g_clk) { if (prop(121, 3, 0)) { rc = 1; break; } }          /* free-run: no PTS */
             else if (prop(121, 3, 0) || prop(14, 0, g_vmode == 2 && g_clk ? 0xffffffffu : pts)) { rc = 1; break; }
-            if (data(rbuf + rp + sizeof h, h.len) || pkt_flush()) { rc = 1; break; }
+            if (video_data(rbuf + rp + sizeof h, h.len) || pkt_flush()) { rc = 1; break; }
             if (waiting_idr) lg("FIRST IDR sent len=%u", (unsigned)h.len);
             if (!g_clk && !prefilled) {
                 uint64_t tw;
@@ -309,6 +315,17 @@ static int live_once(ring_hdr *r, uint32_t vlead)
     return rc;
 }
 
+/* live_once until stopped: a fatal DSP error (see on_cmd) starts a new DSP session
+ * instead of ending cicaalive, so the picture comes back by itself. */
+static int live_session(ring_hdr *r, uint32_t vlead)
+{
+    for (;;) {
+        int rc = live_once(r, vlead);
+        if (!d.fatal || stop_requested()) return rc;
+        lg("DSP error -> new DSP session");
+    }
+}
+
 static int live(int secs_unused)
 {
     ring_hdr *r; int rc = 1, f, order[4], n = 0, i; uint32_t vlead = AAP_VLEAD_MS * 1000u;
@@ -334,6 +351,7 @@ static int live(int secs_unused)
     lg("video lead %u ms dsp_dbg=%u mode=%s", (unsigned)(vlead / 1000), g_dbglvl, g_vmode == 1 ? "nopts" : g_vmode == 2 ? "pts-1" : "pts");
     r = ring_open(); if (!r) { lg("ring open failed errno=%d", errno); return 1; }
     r->reader_pid = (uint32_t)getpid();
+    g_ring = r;
     g_ar = aring_open();
     lg("RING attached size=%u cfg_len=%u frames_in=%u drop=%u %ux%u audio_ring=%s", (unsigned)r->size, (unsigned)r->cfg_len,
        (unsigned)r->frames_in, (unsigned)r->frames_drop, (unsigned)r->width, (unsigned)r->height, g_ar ? "ok" : "FAILED");
@@ -341,8 +359,8 @@ static int live(int secs_unused)
     if (!g_ar) { n = 0; order[n++] = FMT_AAC; }
     for (i = 0; i < n && !stop_requested(); i++) {
         g_fmt = order[i];
-        rc = live_once(r, vlead);
-        if (rc == 1 && g_fmt == FMT_AAC) { int k; for (k = 0; k < 3 && rc == 1 && !stop_requested(); k++) { lg("AAC init retry %d", k + 1); sleep(1); rc = live_once(r, vlead); } }
+        rc = live_session(r, vlead);
+        if (rc == 1 && g_fmt == FMT_AAC) { int k; for (k = 0; k < 3 && rc == 1 && !stop_requested(); k++) { lg("AAC init retry %d", k + 1); sleep(1); rc = live_session(r, vlead); } }
         if (rc != 2) break;
         usleep(300000);
     }

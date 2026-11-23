@@ -106,7 +106,13 @@ static int g_aac;
 static void audio_discovery(pb_t *sd)
 {
     int i;
-    g_usb_media=1;   /* all AA audio (media, voice, system) goes over USB to the DSP */
+    /* "Switch Audio" button of the plugin: default (no aaaudio.on) = BT Audio, media ch4 is
+       NOT announced, so the phone plays music over Bluetooth A2DP and the CIC keeps its own
+       entertainment source. That is the only mode in which the steering-wheel/panel keys,
+       the volume range and the CIC's source handling work as usual. aaaudio.on = all AA
+       audio over USB -> DSP (as in 1.0). Read at every service discovery, so a change takes
+       effect at the next Connect (the plugin disconnects when the button is pressed). */
+    g_usb_media=access(AAP_AAUDIO_ON,0)==0;
     g_aac=1;         /* media as AAC-LC: decoded by the DSP (M4AC) */
     for(i=0;i<3;++i) {
         pb_t ch,sub,cfg;

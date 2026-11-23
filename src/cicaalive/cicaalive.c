@@ -93,7 +93,11 @@ static int on_cmd(void *ch, unsigned size, const unsigned char *m, void *user)
         pthread_mutex_lock(&d.mu);
         if (type == 4) d.started = 1;
         if (type == 5) d.stopped = 1;
-        if (type == 3) { d.errors++; if (code == 3) d.fatal = 1; else g_resync = 1; }
+        /* Every AVP_EVENT_ERROR ends the DSP session; live_session() then opens a new
+           one. Car finding: after a non-fatal stream error the old "resync" (header +
+           wait for IDR) often left the picture frozen until AA was reconnected, while a
+           fresh DSP session recovers in about a second (one short flicker). */
+        if (type == 3) { d.errors++; d.fatal = 1; (void)code; }
         pthread_cond_broadcast(&d.cv);
         pthread_mutex_unlock(&d.mu);
     }
@@ -108,6 +112,64 @@ static int on_buf(void *ch, unsigned x, void *u)
  * PTS = arrival - clock_start + 150 ms so they show right after arrival. */
 static volatile int g_clk, g_afull;
 static volatile uint64_t g_clk_us;
+/* ---------------- display delay control (logger thread) ----------------
+ * Car finding: the DSP shows frames strictly in its own clock and the phone delivers
+ * slightly faster, so the queue between arrival and display grows (~+1 ms per second,
+ * from ~190 ms after a fresh start up to >1 s while scrolling). Shifting timestamps
+ * does not help (tested). What helps is to let the DSP play out what it has, skip new
+ * frames until a fresh IDR and start again with an empty queue ("resync").
+ *  - fresh start: once, 2.5 s after the DSP clock started (the start-up backlog is
+ *    the biggest one). A second fresh start at 5 s caused a visible double flicker.
+ *  - watchdog: if the delay stays above 350 ms for 2 s (not in the first 6 s, at most
+ *    every 30 s) -> resync. Result: ~190-350 ms instead of growing without limit, with
+ *    one short flicker when it triggers.
+ * Delay = time since clock start - PTS of the frame the DSP just shows. The DSP time
+ * update message (0xe7, type 1) carries that PTS at offset 20 in 45 kHz ticks.
+ * Resync itself (main loop, live.inc): header again + wait for IDR, but the IDR is only
+ * requested once all frames sent before the resync have been shown (g_drain_since),
+ * otherwise the new IDR queues up behind the old backlog. Fallback after 2.7/2.8 s.
+ * NOTE: with logs OFF the DSP debug level drops to 1 after 1 s (see live.inc). The
+ * fresh start does not depend on DSP messages; whether the type 1 messages (and thus
+ * the watchdog/drain) still arrive at level 1 was not verified in the car. */
+static ring_hdr *g_ring;                  /* set in live() */
+static volatile uint32_t g_drain_since;   /* now_us() low 32 bits at resync, 0 = no drain pending */
+static int g_fresh;                       /* fresh starts done in this DSP session */
+static uint32_t g_last_shown, g_over_since, g_last_trigger;
+static void fresh_start_check(void)
+{
+    if (!g_clk) { g_fresh = 0; return; }
+    if (g_fresh >= 1 || now_us() - g_clk_us < 2500000u) return;
+    g_fresh++; g_resync = 1;
+    lg("FRESH START %d", g_fresh);
+}
+static void backlog_watch(const unsigned char *b, unsigned n)
+{
+    uint32_t now, elapsed, shown45, shown, since; int32_t delay;
+    if (!g_clk || n < 24) return;
+    now = (uint32_t)now_us(); elapsed = now - (uint32_t)g_clk_us;
+    memcpy(&shown45, b + 20, 4);
+    if (!shown45 || shown45 == g_last_shown) return;          /* only when a new frame is shown */
+    g_last_shown = shown45;
+    shown = (uint32_t)((uint64_t)shown45 * 1000u / 45u);       /* 45 kHz -> us */
+    if (shown > elapsed + 1000000u) return;                     /* implausible */
+    delay = (int32_t)(elapsed - shown);
+    since = g_drain_since;
+    if (since) {                                                /* resync pending */
+        if (now - since >= 2700000u) { g_drain_since = 0; lg("DRAIN %d (timeout)", (int)delay); return; }
+        if ((int32_t)shown >= (int32_t)(since - (uint32_t)g_clk_us) - 100000) {
+            if (g_ring) g_ring->want_idr = 1;                   /* backlog shown -> fresh IDR now */
+            g_drain_since = 0; lg("DRAIN %d", (int)delay);
+        }
+        return;
+    }
+    if (elapsed < 6000000u) return;
+    if (delay <= 350000) { g_over_since = 0; return; }
+    if (!g_over_since) { g_over_since = now; return; }
+    if (now - g_over_since < 2000000u || now - g_last_trigger < 30000000u) return;
+    g_last_trigger = now; g_over_since = 0; g_resync = 1;
+    lg("BACKLOG %d us", (int)delay);
+}
+
 static void mq_drain(void)
 {
     for (;;) {
@@ -124,15 +186,17 @@ static void mq_drain(void)
             g_clk_us = now_us(); g_clk = 1; lg("CLOCK STARTED (DSP pipe ready) -> live PTS");
         }
         if (!g_afull && strstr(txt, "Audio Pipe ES buffer is Full")) { g_afull = 1; lg("AUDIO PIPE FULL seen"); }
+        if (n > 6 && b[6] == 0xe7 && type == 1) backlog_watch(b, n);
         if (n > 6 && b[6] == 0xe7 && type == 3) lg("DSP AVP_EVENT_ERROR code=%u", (unsigned)code);
         else if (n > 6 && b[6] == 0xe7 && type == 4) lg("DSP AVP_EVENT_STARTED");
         else if (n > 6 && b[6] == 0xe7 && type == 5) lg("DSP AVP_EVENT_STOPPED");
+        else if (type == 1) ;          /* DSP progress messages (~20/s, binary payload): not logged */
         else if (k > 3) lg("DSP(%02x/%u size=%u) %s", n > 6 ? b[6] : 0, (unsigned)type, size, txt);
         else lg("DSP msg id=0x%02x type=%u size=%u", n > 6 ? b[6] : 0, (unsigned)type, size);
     }
     if (mq_lost) { lg("DSP msgs lost=%u", (unsigned)mq_lost); mq_lost = 0; }
 }
-static void *logger(void *u) { (void)u; while (!g_quit) { mq_drain(); usleep(50000); } mq_drain(); return 0; }
+static void *logger(void *u) { (void)u; while (!g_quit) { mq_drain(); fresh_start_check(); usleep(50000); } mq_drain(); return 0; }
 /* SIGSEGV/SIGBUS: async-safe line with fault address, then exit 139. */
 static int g_logfd = -1;
 static void hexw(char *o, unsigned v) { int i; for (i = 7; i >= 0; i--) { o[i] = "0123456789abcdef"[v & 15]; v >>= 4; } }
@@ -262,6 +326,43 @@ static int data(const unsigned char *s, uint32_t len)
     return 0;
 }
 
+/* ---------------- 1 MiB boundary of the DSP video buffer ----------------
+ * Car finding (2026-11): the DM642 firmware keeps the video elementary stream in a
+ * 1 MiB ring. A NAL unit that straddles the 1 MiB wrap is decoded wrongly: freezes,
+ * flicker or block artefacts, and in the log an AVP_EVENT_ERROR roughly every 1-2 min
+ * with a static map (small P-frames, so the wrap is hit at regular intervals).
+ * Fix: count the stream bytes the DSP stores (avcC + NAL data) and, when a frame ends
+ * in the last 60 KB before a 1 MiB boundary, append an H.264 filler NAL (type 12,
+ * ignored by the decoder) that runs 4 KB past the boundary. The next frame then always
+ * starts behind the boundary, even if the count is a few bytes off. Frames larger than
+ * 60 KB could still cross it; with AA at 800x480 none was seen. Result in the car:
+ * zero DSP errors over long drives ("PAD <n> -> <pos>" lines in cicaalive.log).
+ * The counting (only avcC and NAL bytes, reset at the first packet of a DSP session)
+ * is exactly what was tested; it was found empirically, not from DSP documentation. */
+#define VBUF_RING   0x100000u        /* DSP video ring size */
+#define VBUF_GUARD  0xf000u          /* frame ends closer than this to the wrap -> pad */
+#define VBUF_OVER   0x1000u          /* filler runs this far past the wrap */
+static uint32_t g_vpos;              /* bytes stored in the DSP video ring this session */
+static unsigned char g_filler[VBUF_GUARD + VBUF_OVER];
+static int video_data(const unsigned char *s, uint32_t len)
+{
+    uint32_t rem, pad;
+    if (data(s, len)) return -1;
+    g_vpos += len;
+    rem = (0u - g_vpos) & (VBUF_RING - 1);       /* bytes to the next boundary (0 = on it) */
+    if (rem >= VBUF_GUARD) return 0;
+    pad = rem + VBUF_OVER;
+    memset(g_filler, 0xff, pad);
+    g_filler[0] = 0; g_filler[1] = 0;             /* 4-byte NAL length (AVC format), < 64 KB */
+    g_filler[2] = (unsigned char)((pad - 4) >> 8); g_filler[3] = (unsigned char)(pad - 4);
+    g_filler[4] = 12;                             /* nal_unit_type 12 = filler data */
+    g_filler[pad - 1] = 0x80;                     /* rbsp stop bit */
+    if (data(g_filler, pad)) return -1;
+    g_vpos += pad;
+    lg("PAD %u -> %u", (unsigned)pad, (unsigned)g_vpos);
+    return 0;
+}
+
 /* video stream header, as writer_dm642 emitted for cic_f2 (car_logs/v46 capture) */
 static int send_header(const uint8_t *avcc, uint32_t n, unsigned w, unsigned h)
 {
@@ -277,6 +378,8 @@ static int send_header(const uint8_t *avcc, uint32_t n, unsigned w, unsigned h)
     if (prop(121, 3, 0) || prop(121, 0x20, 0x80000002u) || prop(121, 0x21, 0x41564331u) ||
         prop(121, 0x24, 0x1f) || prop(30, 0, 2) || data(blob, sizeof blob) ||
         prop(121, 3, 0) || data(avcc, n)) return -1;
+    if (d.mra == 0) g_vpos = 0;      /* first packet of this DSP session: empty ring */
+    g_vpos += n;
     lg("HEADER avcC=%u %ux%u", (unsigned)n, w, h);
     return 0;
 }

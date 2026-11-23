@@ -17,6 +17,17 @@
  *                                            (C64x "mvk 0x2d0,a4" at 0x81f147e4)
  *   file 0x1ddcfc: 0x02801728 -> 0x028019a8  H.264 SPS pic_width_in_mbs limit 46 -> 51
  *                                            (C64x "mvk 0x2e,a5" at 0x819527ec)
+ *   file 0x09ba68: 0x000c0275 -> 0x00000001  late-frame skip counter: the store
+ *                                            "stw A0,*A3" at 0x81f1bd34 becomes a NOP
+ *                                            (p-bit kept, so the execute packet is unchanged)
+ *
+ * Why the third patch: after one late frame the DVD firmware computes how many
+ * frames it is behind and then silently drops that many following frames (it saw
+ * values like 39). A DVD always delivers new frames, Android Auto does not: it only
+ * sends a frame when the screen changes. So after e.g. fast scrolling the picture
+ * froze until N more frames had arrived (tilting the controller "helped" because it
+ * produces new frames). With the counter store removed a late frame is simply shown
+ * late and the next frames are shown normally.
  * Output only to stdout. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,10 +46,12 @@
 #define DSPIPC_REBOOT 0x8004050c
 #define IMG_SIZE 2363004L
 
-static const struct { long off; unsigned old_w, new_w; } kPatch[2] = {
+static const struct { long off; unsigned old_w, new_w; } kPatch[] = {
     { 0x094518L, 0x02016829u, 0x02019029u },
     { 0x1ddcfcL, 0x02801728u, 0x028019a8u },
+    { 0x09ba68L, 0x000c0275u, 0x00000001u },   /* no frame dropping after a late frame */
 };
+#define NPATCH ((int)(sizeof kPatch / sizeof kPatch[0]))
 
 static int dsp_reboot(void)
 {
@@ -82,9 +95,9 @@ static int patch(const char *out)
     img = malloc(n);
     if (!img || read(fd, img, n) != n) { printf("PATCH read failed\n"); close(fd); free(img); return 1; }
     close(fd);
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < NPATCH; i++) {
         unsigned w = be32(img + kPatch[i].off);
-        if (w == kPatch[i].new_w) continue;          /* already patched source (should not happen) */
+        if (w == kPatch[i].new_w) continue;          /* already patched (source was an older patched copy) */
         if (w != kPatch[i].old_w) { printf("PATCH unknown DSP image (0x%lx = 0x%08x)\n", kPatch[i].off, w); free(img); return 1; }
         put_be32(img + kPatch[i].off, kPatch[i].new_w);
     }

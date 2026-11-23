@@ -1,20 +1,30 @@
 /* AAPlugin: Android Auto for the BMW CIC HIGH (QNX 6.3.2, SH4, HmiMain 9283417A).
  *
- * One HMI page: [Conectar Android Auto] [Logs ON/OFF] + one status line.
+ * One HMI page: [Connect] [Disconnect] [Zoom Mode] [Switch Audio] [Logging] + one status
+ * line "Screen: ...".
  *
- *  Conectar -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
+ *  Connect  -> dlopen libcicaa.so (AA protocol over USB, TLS, channels) and start it.
  *           -> patched DM642 DSP image is linked in RAM (dspload on) once per boot.
  *           -> when the first phone video arrives: native HMI video route
  *              (audio C4, video source 8 -> sink 1, StartVideo, geometry, layer 26,
  *              menu layer alpha 0) and the cicaalive process feeds the DSP.
  *           -> our TerminalUI page (210) takes the iDrive: rotary/push/directions go
- *              to the phone. MENU or Volver leaves AA (it keeps running); pressing
- *              Conectar again brings it back. The AA "exit" icon also leaves.
- *  Logs     -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
+ *              to the phone. MENU leaves AA (it keeps running); pressing
+ *              Connect again brings it back. The AA "exit" icon also leaves.
+ *  Disconnect -> ends the AA session on the phone too (ByeByeRequest).
+ *  Switch Audio -> BT Audio (default: phone music over Bluetooth, CIC source kept) or
+ *              AA Audio (all AA audio over USB -> DSP); takes effect at the next Connect.
+ *  Zoom Mode -> Normal / Fullscreen / Stretched (see screen_mode()).
+ *  Keys     -> in AA Audio mode the steering-wheel and panel skip keys go to the phone
+ *              as media next/previous (see key_hook()).
+ *  GPS      -> the CIC position (RHMI data model vehicle.location) goes to the phone
+ *              while AA runs (see onLocation()).
+ *  Logging  -> creates/removes /mnt/hbdebug/aap/logs.on. Nothing is written
  *              anywhere unless it is ON; then logs go to /mnt/hbdebug/aap/logs/.
  *
  * Private HmiMain ABI (fixed addresses) is checked against code signatures before
- * any call; on mismatch nothing is touched. Native HMI services are only used on
+ * any call; on mismatch nothing is touched. Addresses are written for the E9x build
+ * and translated for other known builds (iba_profiles.h). Native HMI services are only used on
  * the HMI ProcUnit thread (marshalled through the HMI executor). */
 namespace bmw {
 class IDispatcher;
@@ -99,12 +109,16 @@ typedef char pointer_must_be_32_bits[sizeof(void*) == 4 ? 1 : -1];
 typedef bmw::Delegate<bool, const bmw::Parcel&, void, void, void> Handler;
 typedef char delegate_must_be_two_words[sizeof(Handler) == 8 ? 1 : -1];
 
-/* IDs must match AAPlugin.xml. */
+/* IDs must match AAPlugin.xml. 185 and 204 keep their numbers from the first release
+ * but have new jobs (185 was Logs, 204 the toolbar Back button of the AA page). */
 enum {
     ACTION_BACK_MAIN = 3,          /* hmiAction -> page 10 */
-    ACTION_CONNECT = 181, ACTION_LOGS = 185,
-    MODEL_STATUS = 182, MODEL_LOGS = 186,
-    AA_SCREEN = 210, AA_KEYS = 211, ACTION_AA_BACK = 204,
+    ACTION_CONNECT = 181, ACTION_ZOOM = 185, ACTION_LOGS = 204, ACTION_DISCONNECT = 187,
+    ACTION_AUDIO = 189,
+    MODEL_STATUS = 182,            /* connection status text (kept, no label on the page) */
+    MODEL_SCREEN = 186,            /* "Screen: <mode>[ | Logs ON]" line */
+    PAGE_MAIN = 10, PAGE_MAIN_FIRST = 11,
+    AA_SCREEN = 210, AA_KEYS = 211,
     EVENT_OPEN_AA = 202, EVENT_MAIN = 206
 };
 
@@ -160,7 +174,7 @@ struct UiGuard {
     ~UiGuard() { if (locked) pthread_mutex_unlock(g_ui_mtx); }
 };
 #include "aap_i18n.h"
-/* Every model text goes out translated (Spanish texts are the keys, see aap_i18n.h). */
+/* Every model text goes out translated (English texts are the keys, see aap_i18n.h). */
 static inline void ui(bmw::PluginApp* a, unsigned m, const char* v) { UiGuard g; v = tr(v); a->updateModel(m, v ? v : ""); }
 static int spawn(void* (*fn)(void*)) {
     int tid = 0; int rc = pthread_create(&tid, 0, fn, 0);
@@ -172,6 +186,7 @@ static const char* snap(const char* src, char* buf, unsigned int cap) {
     if (src) for (; i + 1 < cap && src[i]; ++i) buf[i] = src[i];
     buf[i] = 0; return buf;
 }
+static void status_line(bmw::PluginApp* app);
 static void add(bmw::PluginApp* app, unsigned id, bool (*stub)(void*, const bmw::Parcel&)) {
     Handler h; h.object = app; h.stub = stub; app->addHandler(id, h);
 }
@@ -188,6 +203,7 @@ static fn_void g_aa_project = 0;
 static volatile int g_aa_polling = 0;
 static volatile int g_live_disp = 0;      /* AA video on screen */
 static volatile int g_live_user = 0;      /* user wants AA on screen */
+static volatile int g_focus_left = 0;     /* AA display was left by a focus loss (MENU, PDC...) */
 static long g_live_disp_ms = 0;
 
 /* ---------------- iDrive -> Android keycodes ---------------- */
@@ -221,9 +237,9 @@ static void aa_forward_key(const unsigned* v, unsigned valid) {
         char b[80]; unsigned n = put_str(b, 0, "KEY "); n = put_int(b, n, (int)key);
         n = put_str(b, n, " steps="); n = put_int(b, n, (int)steps); n = put_str(b, n, " down="); n = put_int(b, n, down); b[n] = 0; alog(b);
     }
-    if (key == 13) g_aa_input(2, 65536, (int)steps);          /* rotary clockwise */
-    else if (key == 14) g_aa_input(2, 65536, -(int)steps);    /* rotary counter-clockwise */
-    else if (key < 64 && g_keymap[key]) g_aa_input(1, g_keymap[key], down);
+    if (key == 13) g_aa_input(CICAA_IN_REL, 65536, (int)steps);          /* rotary clockwise */
+    else if (key == 14) g_aa_input(CICAA_IN_REL, 65536, -(int)steps);    /* rotary counter-clockwise */
+    else if (key < 64 && g_keymap[key]) g_aa_input(CICAA_IN_KEY, g_keymap[key], down);
 }
 typedef bmw::Map<unsigned, bmw::Variant> KeyMap;
 typedef bmw::Delegate<bool, const KeyMap&, void, void, void> KeyHandler;
@@ -246,22 +262,58 @@ static void key_sample(int focus, const KeyMap* map) {
             }
         }
     }
-    if (!focus) { aa_forward_key(values, valid); return; }
+    if (!focus) {
+        /* First key on the (empty) AA page after a focus loss: bring the picture back
+           instead of sending the key to the phone (fallback for the focus path below). */
+        if (g_focus_left && !g_live_user && g_aa_polling) { g_live_user = 1; g_focus_left = 0; alog("key -> resume AA display"); return; }
+        aa_forward_key(values, valid);
+        return;
+    }
     /* MENU / leaving our page while AA is shown -> back to the car UI (AA keeps running). */
-    if (g_live_disp && (unsigned long)(mono_ms() - g_live_disp_ms) > 2000UL) { g_live_user = 0; alog("focus lost -> leave AA display"); }
+    if (g_live_disp) {
+        if ((unsigned long)(mono_ms() - g_live_disp_ms) > 2000UL) { g_live_user = 0; g_focus_left = 1; alog("focus lost -> leave AA display"); }
+        return;
+    }
+    /* Focus came back to the AA page (end of PDC/reverse camera, BACK from the menu, an
+       OPTION overlay closed...): resume the display by itself, the session never stopped. */
+    if (g_focus_left && g_aa_polling) { g_focus_left = 0; g_live_user = 1; alog("focus back -> resume AA display"); }
 }
 static bool onKeys(void*, const KeyMap& map) { key_sample(0, &map); return false; }
 static bool onFocus(void*, const KeyMap& map) { key_sample(1, &map); return false; }
-static bool onAaBack(void* obj, const bmw::Parcel&) {
-    if (g_live_disp) { g_live_user = 0; alog("Volver -> leave AA display"); }
-    static_cast<bmw::PluginApp*>(obj)->triggerEvent(EVENT_MAIN);
-    return true;
-}
 
 /* ======================= native HMI video route ======================= */
 #include "iba_state.h"
 #include "iba_firmware.h"
 #include "iba_marshal.h"
+#include "iba_profiles.h"
+/* HmiMain build profile (iba_profiles.h). 0 until iba_profile_select() found one;
+ * until then iba_a() returns the E9x address unchanged. */
+static const IbaProfile* g_iba_profile = 0;
+static int g_iba_profile_done = 0;
+static unsigned long iba_xlat(const IbaProfile* p, unsigned long a) {
+    for (unsigned i = 0; p && i < p->nxlat; ++i) if (p->xlat[i].from == a) return p->xlat[i].to;
+    return a;
+}
+static unsigned long iba_a(unsigned long a) { return iba_xlat(g_iba_profile, a); }
+static int iba_sig_ok(const IbaProfile* p, unsigned long a, const unsigned char* bytes) {
+    for (unsigned i = 0; i < p->nfix; ++i) if (p->fix[i].from == a) { bytes = p->fix[i].bytes; break; }
+    const unsigned char* code = (const unsigned char*)iba_xlat(p, a);
+    for (unsigned j = 0; j < 32; ++j) if (code[j] != bytes[j]) return 0;
+    return 1;
+}
+/* First profile whose anchors and marshal fingerprints all match the running HmiMain. */
+static const IbaProfile* iba_profile_select() {
+    if (g_iba_profile_done) return g_iba_profile;
+    g_iba_profile_done = 1;
+    for (unsigned p = 0; p < IBA_N(kIbaProfiles); ++p) {
+        const IbaProfile* pr = &kIbaProfiles[p];
+        int bad = 0;
+        for (unsigned i = 0; !bad && i < IBA_N(kIbaAnchors); ++i) bad = !iba_sig_ok(pr, kIbaAnchors[i].address, kIbaAnchors[i].bytes);
+        for (unsigned i = 0; !bad && i < IBA_N(kIbaMarshalSigs); ++i) bad = !iba_sig_ok(pr, kIbaMarshalSigs[i].address, kIbaMarshalSigs[i].bytes);
+        if (!bad) { g_iba_profile = pr; return pr; }
+    }
+    return 0;
+}
 static int auto_busy_control();
 static void auto_tick(bmw::PluginApp*);
 static int auto_is_shutdown();
@@ -281,9 +333,9 @@ static int g_iba_layer = 0, g_iba_source_changed = 0, g_iba_previous_source = 0;
 static int g_iba_suspended = 0;
 static short g_iba_rect[2][4];
 static int g_iba_restore_sent = 0, g_iba_restore_failed = 0;
-static const char* const kIbaNames[] = {"comprobar", "pedir audio C4", "seleccionar fichero",
- "conectar video 8->1", "arrancar video", "mostrar capa", "parar video",
- "retirar video", "retirar audio", "esperando ACK", "video en marcha", "terminado", "fallo"};
+static const char* const kIbaNames[] = {"check", "request audio C4", "select file",
+ "connect video 8->1", "start video", "show layer", "stop video",
+ "disconnect video", "release audio", "waiting for ACK", "video running", "finished", "failed"};
 /* HmiMain LayerToolkit helper (enable layer 26), as the factory USB player uses it. */
 static const unsigned long kLayerHelper = 0x08add9d4UL;
 static void* iba_off(void* p, unsigned n) { return (char*)p + n; }
@@ -314,48 +366,60 @@ static void iba_stop_ack(void*, unsigned short h) { iba_event(IBA_STOP, h, 1); }
 static void iba_stop_err(void*, unsigned short h, unsigned char) { iba_event(IBA_STOP, h, 0); }
 static void iba_deck(void*, void*) {}
 static int iba_signatures() {
-    for (unsigned i = 0; i < sizeof(kIbaAnchors) / sizeof(kIbaAnchors[0]); ++i) {
-        const unsigned char* bytes = (const unsigned char*)kIbaAnchors[i].address;
-        for (unsigned j = 0; j < 32; ++j)
-            if (bytes[j] != kIbaAnchors[i].bytes[j]) { g_iba_sig_bad = (int)kIbaAnchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); return 0; }
+    const IbaProfile* pr = iba_profile_select();
+    if (!pr) {   /* report the first anchor that differs from the E9x build */
+        for (unsigned i = 0; i < IBA_N(kIbaAnchors); ++i)
+            if (!iba_sig_ok(&kIbaProfiles[0], kIbaAnchors[i].address, kIbaAnchors[i].bytes)) {
+                g_iba_sig_bad = (int)kIbaAnchors[i].address; alog_val("SIGNATURE_MISMATCH", g_iba_sig_bad); break;
+            }
+        return 0;
     }
+    if (g_logs) { char b[112]; unsigned n = put_str(b, 0, "HmiMain profile "); n = put_str(b, n, pr->name); b[n] = 0; alog(b); }
     return 1;
 }
-/* HMI thread: (re)read the CIC language so the next texts follow it. Only after
- * the HmiMain signature check, the proxy/getter addresses are C1A-specific. */
+/* HMI thread: (re)read the CIC language so the next texts follow it. Only after a
+ * HmiMain profile matched, and only on a build whose addresses for the MMI proxy are
+ * known (E9x, or a profile that translates 0x08be9fb0); otherwise English stays. */
 static void lang_refresh() {
-    if (pthread_self() != g_hmi_tid || !iba_signatures()) return;
+    if (pthread_self() != g_hmi_tid || !iba_profile_select()) return;
+    if (g_iba_profile != &kIbaProfiles[0] && iba_a(0x08be9fb0UL) == 0x08be9fb0UL) return;
+    typedef void* (*MmiFactory)(unsigned);
+    typedef int (*GetLanguage)(void*, int*);
+    void* mmi = ((MmiFactory)iba_a(0x08be9fb0UL))(1);
+    if (!mmi) return;
+    void* prop = iba_off(mmi, 0x750);
+    unsigned long vp = *(unsigned long*)prop;   /* CCurrentLanguage or its property bases */
+    if (vp != iba_a(0x09213980UL) && vp != iba_a(0x09231840UL) && vp != iba_a(0x09231814UL)) { alog("CIC language: unexpected property"); return; }
     int raw = 0;
-    if (!aap_lang_read(&raw)) { if (!g_lang_set) alog("CIC language not available yet"); return; }
-    int l = aap_lang_from_cic(raw);
-    if (!g_lang_set || raw != g_lang_raw) { g_lang_raw = raw; alog_val("CIC language", raw); }
-    g_lang = l; g_lang_set = 1;
+    if (!((GetLanguage)iba_a(0x08bea500UL))(prop, &raw)) return;   /* not valid yet */
+    if (raw != g_lang_raw) { g_lang_raw = raw; alog_val("CIC language", raw); }
+    g_lang = aap_lang_from_cic(raw);
 }
 static int iba_list(void* proxy, unsigned offset, void* cb, int property = 0) {
     typedef int (*AddListener)(void*, void*, void*, unsigned);
     if (!iba_before("register listener")) return 0;
-    return ((AddListener)(property ? 0x082c2268UL : 0x082c2148UL))(iba_off(proxy, offset), g_iba_target, cb, 0);
+    return ((AddListener)(property ? iba_a(0x082c2268UL) : iba_a(0x082c2148UL)))(iba_off(proxy, offset), g_iba_target, cb, 0);
 }
 static int iba_check(bmw::PluginApp* app) {
     if (g_iba_checked) return g_iba.ready;
     if (g_iba_tid == -1) g_iba_tid = pthread_self();
     g_iba_checked = 1;
-    if (!iba_before("firmware check")) { iba_ui(app, "Hilo HMI distinto"); return 0; }
-    if (!iba_signatures()) { iba_ui(app, "HmiMain distinto: no compatible"); return 0; }
+    if (!iba_before("firmware check")) { iba_ui(app, "Wrong HMI thread"); return 0; }
+    if (!iba_signatures()) { iba_ui(app, "Different HmiMain: not compatible"); return 0; }
     typedef void* (*Factory)(unsigned);
     typedef void (*Ctor)(void*);
-    ((Ctor)0x08201c58UL)(g_iba_target); g_iba_target_live = 1;
-    g_iba_cm = ((Factory)0x08b9d1b0UL)(0);
-    g_iba_aux = ((Factory)0x08b64d18UL)(38);
-    g_iba_vcm = ((Factory)0x08ce0fc4UL)(1);
-    g_iba_sink = ((Factory)0x08ce328cUL)(1);
-    if (!(g_iba_cm && g_iba_aux && g_iba_vcm && g_iba_sink)) { iba_ui(app, "Faltan servicios de video del CIC"); return 0; }
-    if (*(unsigned long*)iba_off(g_iba_cm, 0x6c8) != 0x0920cbbcUL ||
-        *(unsigned long*)iba_off(g_iba_vcm, 0x6c8) != 0x092276c0UL ||
-        *(unsigned long*)iba_off(g_iba_vcm, 0x760) != 0x0922767cUL ||
-        *(unsigned long*)iba_off(g_iba_aux, 0x1de4) != kIbaSelectVtable ||
-        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != kIbaStartVtable) { iba_ui(app, "Layout de servicios distinto"); return 0; }
-#define IBA_LIST(p, o, f) if (!iba_list(p, o, (void*)&f)) { iba_ui(app, "No se pudo registrar listener"); return 0; }
+    ((Ctor)iba_a(0x08201c58UL))(g_iba_target); g_iba_target_live = 1;
+    g_iba_cm = ((Factory)iba_a(0x08b9d1b0UL))(0);
+    g_iba_aux = ((Factory)iba_a(0x08b64d18UL))(38);
+    g_iba_vcm = ((Factory)iba_a(0x08ce0fc4UL))(1);
+    g_iba_sink = ((Factory)iba_a(0x08ce328cUL))(1);
+    if (!(g_iba_cm && g_iba_aux && g_iba_vcm && g_iba_sink)) { iba_ui(app, "CIC video services missing"); return 0; }
+    if (*(unsigned long*)iba_off(g_iba_cm, 0x6c8) != iba_a(0x0920cbbcUL) ||
+        *(unsigned long*)iba_off(g_iba_vcm, 0x6c8) != iba_a(0x092276c0UL) ||
+        *(unsigned long*)iba_off(g_iba_vcm, 0x760) != iba_a(0x0922767cUL) ||
+        *(unsigned long*)iba_off(g_iba_aux, 0x1de4) != iba_a(kIbaSelectVtable) ||
+        *(unsigned long*)iba_off(g_iba_sink, 0xa48) != iba_a(kIbaStartVtable)) { iba_ui(app, "Unexpected service layout"); return 0; }
+#define IBA_LIST(p, o, f) if (!iba_list(p, o, (void*)&f)) { iba_ui(app, "Could not register listener"); return 0; }
     IBA_LIST(g_iba_cm, 0x754, iba_audio_ack)
     IBA_LIST(g_iba_cm, 0x6f4, iba_audio_err)
     IBA_LIST(g_iba_cm, 0x7ec, iba_release_ack)
@@ -368,7 +432,7 @@ static int iba_check(bmw::PluginApp* app) {
         !iba_list(g_iba_sink, 0xc80, (void*)&iba_deck, 1) ||
         !iba_list(g_iba_sink, 0xb78, (void*)&iba_deck, 1) ||
         !iba_list(g_iba_sink, 0xbfc, (void*)&iba_deck, 1) ||
-        !iba_list(g_iba_vcm, 0x7f8, (void*)&iba_deck, 1)) { iba_ui(app, "Suscripcion de propiedades fallo"); return 0; }
+        !iba_list(g_iba_vcm, 0x7f8, (void*)&iba_deck, 1)) { iba_ui(app, "Property subscription failed"); return 0; }
     IBA_LIST(g_iba_vcm, 0x754, iba_conn_ack)
     IBA_LIST(g_iba_vcm, 0x6f4, iba_conn_err)
     IBA_LIST(g_iba_vcm, 0x7ec, iba_disconn_ack)
@@ -382,33 +446,33 @@ static int iba_check(bmw::PluginApp* app) {
 }
 static unsigned iba_handle() {
     typedef unsigned short (*Role)();
-    unsigned h = ((((Role)0x08d6ebbcUL)() & 0xffffU) << 4) | 0xf000U;
+    unsigned h = ((((Role)iba_a(0x08d6ebbcUL))() & 0xffffU) << 4) | 0xf000U;
     return (h + (g_iba_sequence++ & 15U)) & 0xffffU;
 }
 static int iba_idle_sink() {
     typedef int (*Get)(void*, int*); int source = -1;
     if (!iba_before("read current video source")) return 0;
     typedef int (*ValidSource)(void*);
-    if (!((ValidSource)0x08d1ae64UL)(iba_off(g_iba_sink, 0xc80))) return 0;
-    int rc = ((Get)0x08ce4890UL)(iba_off(g_iba_sink, 0xc80), &source);
+    if (!((ValidSource)iba_a(0x08d1ae64UL))(iba_off(g_iba_sink, 0xc80))) return 0;
+    int rc = ((Get)iba_a(0x08ce4890UL))(iba_off(g_iba_sink, 0xc80), &source);
     alog_val("current source", source);
     int own = g_iba.result[IBA_CONNECT] == 1;
-    if (!rc || (source != 0 && !(own && source == 8))) { iba_ui(g_app, "Pantalla de video ocupada por otra fuente"); return 0; }
+    if (!rc || (source != 0 && !(own && source == 8))) { iba_ui(g_app, "Video screen busy with another source"); return 0; }
     typedef int (*Valid)(void*);
     typedef int (*Table)(void*, int, int*);
     void* table = iba_off(g_iba_vcm, 0x7f8);
-    if (!((Valid)0x08d1ae64UL)(table)) return 0;
+    if (!((Valid)iba_a(0x08d1ae64UL))(table)) return 0;
     int connected = -1;
-    if (!((Table)0x08ce160cUL)(table, 1, &connected) || connected != (own ? 8 : 0)) {
+    if (!((Table)iba_a(0x08ce160cUL))(table, 1, &connected) || connected != (own ? 8 : 0)) {
         /* car: connect ACK but table stays 0 until video starts; only that case continues */
-        if (!(own && connected == 0 && source == 0)) { iba_ui(g_app, "Tabla de video distinta"); return 0; }
+        if (!(own && connected == 0 && source == 0)) { iba_ui(g_app, "Unexpected video table"); return 0; }
     }
     if (!own) g_iba_previous_source = source;
     return 1;
 }
 static int iba_rect_valid(unsigned offset) {
     typedef int (*Valid)(void*);
-    return ((Valid)0x08d1ae64UL)(iba_off(g_iba_sink, offset)) != 0;
+    return ((Valid)iba_a(0x08d1ae64UL))(iba_off(g_iba_sink, offset)) != 0;
 }
 static int iba_snapshot_rect() {
     if (!iba_before("snapshot rectangles")) return 0;
@@ -419,9 +483,26 @@ static int iba_snapshot_rect() {
 }
 static int g_dsp_pid = 0;
 static int g_dsp_attempted = 0;
+/* Screen mode (Zoom Mode button), stored as files so it survives a CIC restart:
+ *   none     -> 0 Normal:     picture centred (x 256..1216), CIC menu/arcs stay visible
+ *   zoom.on  -> 1 Fullscreen: same size from x = 0, CIC menu layer hidden, rest black
+ *   wide.on  -> 2 Stretched:  stretched to the full 1280 px width, CIC menu hidden
+ * Built-in geometry (geom.txt is gone: the layout must match what libcicaa asks the
+ * phone for, so a free text file only caused broken pictures). */
+static int screen_mode() {
+    if (file_exists(AAP_WIDE_ON)) return 2;
+    return file_exists(AAP_ZOOM_ON) ? 1 : 0;
+}
+static void screen_mode_next() {
+    int m = (screen_mode() + 1) % 3;
+    unlink(AAP_ZOOM_ON); unlink(AAP_WIDE_ON);
+    if (m) { int f = open(m == 1 ? AAP_ZOOM_ON : AAP_WIDE_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+}
 static void geom_load(short* g) {
-    static const short def[8] = AAP_GEOM;
-    for (int i = 0; i < 8; ++i) g[i] = def[i];
+    static const short def[3][8] = {AAP_GEOM_NORMAL, AAP_GEOM_FULLSCREEN, AAP_GEOM_STRETCHED};
+    int m = screen_mode();
+    for (int i = 0; i < 8; ++i) g[i] = def[m][i];
+    /* geom.txt (optional, e.g. with video.txt on an E60) replaces the built-in geometry */
     int f = open(AAP_GEOM_TXT, 0);
     if (f < 0) return;
     char b[80]; int n = read(f, b, sizeof b - 1); close(f);
@@ -440,34 +521,34 @@ static int iba_apply_geometry(bmw::PluginApp*) {
      * native PAL geometry is the fallback if the scaler refuses the AA rectangle. */
     typedef void* (*Factory)(); typedef int (*Geometry)(void*, short, short, short, short*);
     if (!iba_before("geometry")) return 0;
-    void* defs = ((Factory)0x08938a00UL)(); if (!defs) return 0;
+    void* defs = ((Factory)iba_a(0x08938a00UL))(); if (!defs) return 0;
     short native[2][4];
-    int ok = ((Geometry)0x08938b60UL)(defs, 1, 0, 0, native[0]) && ((Geometry)0x08938b60UL)(defs, 2, 0, 0, native[1]);
+    int ok = ((Geometry)iba_a(0x08938b60UL))(defs, 1, 0, 0, native[0]) && ((Geometry)iba_a(0x08938b60UL))(defs, 2, 0, 0, native[1]);
     short g[8]; geom_load(g);
     typedef int (*Rect)(void*, short, short, short, short);
-    int okin = ((Rect)0x08ce4408UL)(iba_off(g_iba_sink, 0xb78), g[0], g[1], g[2], g[3]);
-    int okout = okin && ((Rect)0x08ce464cUL)(iba_off(g_iba_sink, 0xbfc), g[4], g[5], g[6], g[7]);
+    int okin = ((Rect)iba_a(0x08ce4408UL))(iba_off(g_iba_sink, 0xb78), g[0], g[1], g[2], g[3]);
+    int okout = okin && ((Rect)iba_a(0x08ce464cUL))(iba_off(g_iba_sink, 0xbfc), g[4], g[5], g[6], g[7]);
     if (!okout) {
         alog("AA geometry refused -> native DVD window");
         if (!ok) return 0;
-        if (!((Rect)0x08ce4408UL)(iba_off(g_iba_sink, 0xb78), native[0][0], native[0][1], native[0][2], native[0][3])) return 0;
-        if (!((Rect)0x08ce464cUL)(iba_off(g_iba_sink, 0xbfc), native[1][0], native[1][1], native[1][2], native[1][3])) return 0;
+        if (!((Rect)iba_a(0x08ce4408UL))(iba_off(g_iba_sink, 0xb78), native[0][0], native[0][1], native[0][2], native[0][3])) return 0;
+        if (!((Rect)iba_a(0x08ce464cUL))(iba_off(g_iba_sink, 0xbfc), native[1][0], native[1][1], native[1][2], native[1][3])) return 0;
     }
     return 1;
 }
 static int iba_route_ours(bmw::PluginApp* app) {
     typedef int (*Valid)(void*); typedef int (*Get)(void*, int*); typedef int (*Table)(void*, int, int*);
     void* src = iba_off(g_iba_sink, 0xc80); void* table = iba_off(g_iba_vcm, 0x7f8);
-    if (!((Valid)0x08d1ae64UL)(src) || !((Valid)0x08d1ae64UL)(table)) { iba_ui(app, "Esperando ruta de video"); return 0; }
+    if (!((Valid)iba_a(0x08d1ae64UL))(src) || !((Valid)iba_a(0x08d1ae64UL))(table)) { iba_ui(app, "Waiting for video route"); return 0; }
     int current = -1, connection = -1;
-    if (!((Get)0x08ce4890UL)(src, &current) || !((Table)0x08ce160cUL)(table, 1, &connection)) return 0;
+    if (!((Get)iba_a(0x08ce4890UL))(src, &current) || !((Table)iba_a(0x08ce160cUL))(table, 1, &connection)) return 0;
     int own_table_lag = connection == 0 && g_iba.result[IBA_CONNECT] == 1;
-    if ((current != 0 && current != 8) || (connection != 8 && !own_table_lag)) { iba_ui(app, "Ruta de video cambiada por otro cliente"); return 0; }
+    if ((current != 0 && current != 8) || (connection != 8 && !own_table_lag)) { iba_ui(app, "Video route changed by another client"); return 0; }
     return 1;
 }
 static int iba_restore_sink(bmw::PluginApp* app) {
     if (!g_iba_source_changed) return 1;
-    if (g_iba_restore_failed) { iba_ui(app, "Fallo restaurando video; reinicia el CIC"); return 0; }
+    if (g_iba_restore_failed) { iba_ui(app, "Video restore failed; restart the CIC"); return 0; }
     typedef int (*SetSource)(void*, int, unsigned char);
     typedef int (*Rect)(void*, short, short, short, short);
     if (!g_iba_restore_sent) {
@@ -476,12 +557,12 @@ static int iba_restore_sink(bmw::PluginApp* app) {
         g_iba_restore_sent = 1;
         for (unsigned i = 0; i < 2; ++i) {
             short* r = g_iba_rect[i];
-            if (!((Rect)(i ? 0x08ce464cUL : 0x08ce4408UL))(iba_off(g_iba_sink, i ? 0xbfc : 0xb78), r[0], r[1], r[2], r[3])) { g_iba_restore_failed = 1; return 0; }
+            if (!((Rect)(i ? iba_a(0x08ce464cUL) : iba_a(0x08ce4408UL)))(iba_off(g_iba_sink, i ? 0xbfc : 0xb78), r[0], r[1], r[2], r[3])) { g_iba_restore_failed = 1; return 0; }
         }
-        if (!((SetSource)0x08ce48e0UL)(iba_off(g_iba_sink, 0xc80), g_iba_previous_source, 0)) { g_iba_restore_failed = 1; return 0; }
+        if (!((SetSource)iba_a(0x08ce48e0UL))(iba_off(g_iba_sink, 0xc80), g_iba_previous_source, 0)) { g_iba_restore_failed = 1; return 0; }
     }
     typedef int (*Get)(void*, int*); int source = -1;
-    int rc = ((Get)0x08ce4890UL)(iba_off(g_iba_sink, 0xc80), &source);
+    int rc = ((Get)iba_a(0x08ce4890UL))(iba_off(g_iba_sink, 0xc80), &source);
     if (!rc || source != g_iba_previous_source || !iba_rect_valid(0xb78) || !iba_rect_valid(0xbfc)) return 0;
     for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j)
         if (g_iba_rect[i][j] != ((short*)iba_off(g_iba_sink, (i ? 0xbfc : 0xb78) + 124))[j]) return 0;
@@ -499,7 +580,7 @@ static int live_spawn() {
 static int live_prepare(bmw::PluginApp* app) {
     if (!g_dsp_attempted) {
         g_dsp_attempted = 1;
-        if (!live_spawn()) { g_iba.failed = 1; iba_ui(app, "No se pudo arrancar cicaalive"); return 0; }
+        if (!live_spawn()) { g_iba.failed = 1; iba_ui(app, "Could not start cicaalive"); return 0; }
         return 0;   /* next tick shows the layer */
     }
     if (!g_dsp_pid) return 0;
@@ -507,7 +588,7 @@ static int live_prepare(bmw::PluginApp* app) {
     int error = r < 0 ? errno : 0;
     if (r == 0) return 1;
     if (r < 0 && error != ECHILD) { if (error != EINTR) g_iba.failed = 1; return 0; }
-    g_dsp_pid = 0; g_iba.failed = 1; iba_ui(app, "cicaalive termino antes de mostrar video"); return 0;
+    g_dsp_pid = 0; g_iba.failed = 1; iba_ui(app, "cicaalive ended before showing video"); return 0;
 }
 static int live_reap() {
     if (!g_dsp_pid) return 1;
@@ -552,7 +633,7 @@ static void menu_hide_for_video() {
     if (g_iba_mgr) {
         int i = menu_find_layer();
         unsigned long* vt = *(unsigned long**)g_iba_mgr;
-        if (i >= 0 && vt[14] == 0x08af0210UL && vt[15] == 0x08af0278UL) {
+        if (i >= 0 && vt[14] == iba_a(0x08af0210UL) && vt[15] == iba_a(0x08af0278UL)) {
             typedef int (*GetAlpha)(void*, unsigned, unsigned char*);
             typedef void (*SetAlpha)(void*, unsigned, unsigned);
             unsigned char a = 255; if (((GetAlpha)vt[15])(g_iba_mgr, (unsigned)i, &a)) g_menu_saved = a;
@@ -579,43 +660,75 @@ static void menu_restore() {
     if (f && g_menu_hold_on) { int cids[1] = {256}; f(cids, 1, 0); }
     g_menu_reasserts = 0; g_menu_last = 0; g_menu_hold_on = 0;
 }
+/* Geometry hold + fade-in (HMI thread, every auto_tick ~250 ms while the layer is on).
+ * Car finding: right after StartVideo the DVD service sets the sink rectangles back to
+ * its own PAL window, sometimes several times during the first second ("full screen for
+ * a moment, then the small PAL window"). So the rectangles are compared with what we saw
+ * last time and our geometry is applied again whenever someone changed them. The layer
+ * is made visible after 4 ticks without a correction, at the latest after 12 ticks. */
+static short g_geo_seen[2][4];
+static int g_geo_stable = 0, g_geo_ticks = 0, g_geo_visible = 0;
+static void geo_read(short r[2][4]) {
+    for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j)
+        r[i][j] = ((short*)iba_off(g_iba_sink, (i ? 0xbfc : 0xb78) + 124))[j];
+}
+static void geometry_hold(bmw::PluginApp* app) {
+    if (!g_iba_layer || !g_iba_sink || !g_iba_mgr) {
+        for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j) g_geo_seen[i][j] = 0;
+        g_geo_stable = g_geo_ticks = g_geo_visible = 0;
+        return;
+    }
+    short cur[2][4]; geo_read(cur);
+    int changed = 0;
+    for (unsigned i = 0; i < 2; ++i) for (unsigned j = 0; j < 4; ++j) if (cur[i][j] != g_geo_seen[i][j]) changed = 1;
+    if (changed) { g_geo_stable = 0; iba_apply_geometry(app); geo_read(g_geo_seen); }
+    ++g_geo_ticks; ++g_geo_stable;
+    if (!g_geo_visible && (g_geo_stable >= 4 || g_geo_ticks >= 12)) {
+        unsigned long* vt = *(unsigned long**)g_iba_mgr;
+        typedef void (*SetAlpha)(void*, unsigned, unsigned);
+        ((SetAlpha)vt[14])(g_iba_mgr, 26, 255);
+        g_geo_visible = 1; alog("video layer visible");
+    }
+}
 /* One step of the native flow (HMI thread only). */
 static void iba_do(bmw::PluginApp* app, int stopping) {
-    if (pthread_self() != g_iba_tid) { iba_ui(app, "Accion fuera del hilo HMI"); return; }
+    if (pthread_self() != g_iba_tid) { iba_ui(app, "Action outside the HMI thread"); return; }
     if (!g_iba.ready) { if (!stopping) iba_check(app); return; }
-    if (g_iba_suspended) { iba_ui(app, "Callback fuera del hilo HMI"); return; }
+    if (g_iba_suspended) { iba_ui(app, "Callback outside the HMI thread"); return; }
     g_iba.expire(mono_ms());
     if (stopping) g_iba.stopping = 1;
     IbaOp op = g_iba.next();
     if (g_iba.stopping && (op == IBA_DISCONNECT || op == IBA_RELEASE || op == IBA_DONE) && !iba_restore_sink(app)) return;
     if (op >= IBA_WAIT) return;
     if (op == IBA_AUDIO) {
-        if (!file_exists(AAP_LIVE)) { iba_ui(app, "Falta cicaalive (reinstalar)"); return; }
+        if (!file_exists(AAP_LIVE)) { iba_ui(app, "cicaalive missing (reinstall)"); return; }
         if (!iba_idle_sink()) return;
         if (!iba_snapshot_rect()) return;
     }
     if (op == IBA_SHOW) {
-        if (*(unsigned long*)0x091fda28UL != 0) { g_iba.failed = 1; iba_ui(app, "Capa de video ocupada por otro cliente"); return; }
+        if (*(unsigned long*)iba_a(0x091fda28UL) != 0) { g_iba.failed = 1; iba_ui(app, "Video layer busy with another client"); return; }
         if (!iba_route_ours(app)) return;
         if (!live_prepare(app)) return;
         if (!iba_apply_geometry(app)) return;
         if (!iba_before("show layer26")) return;
-        typedef void* (*Draw)(); void* draw = ((Draw)0x08ae34e4UL)();
+        typedef void* (*Draw)(); void* draw = ((Draw)iba_a(0x08ae34e4UL))();
         if (!draw) { g_iba.failed = 1; return; }
         unsigned long* vt = *(unsigned long**)draw;
-        if (vt[20] != kIbaLayerManagerGetter) { g_iba.failed = 1; return; }
+        if (vt[20] != iba_a(kIbaLayerManagerGetter)) { g_iba.failed = 1; return; }
         typedef void* (*Manager)(void*); g_iba_mgr = ((Manager)vt[20])(draw);
         if (!g_iba_mgr) { g_iba.failed = 1; return; }
         vt = *(unsigned long**)g_iba_mgr;
-        if (vt[14] != 0x08af0210UL || vt[15] != 0x08af0278UL) { g_iba.failed = 1; return; }
+        if (vt[14] != iba_a(0x08af0210UL) || vt[15] != iba_a(0x08af0278UL)) { g_iba.failed = 1; return; }
         typedef int (*GetAlpha)(void*, unsigned, unsigned char*);
         if (!((GetAlpha)vt[15])(g_iba_mgr, 26, &g_iba_alpha)) { g_iba.failed = 1; return; }
         g_iba.issue(op, 0, mono_ms());
         typedef void (*SetAlpha)(void*, unsigned, unsigned);
-        ((SetAlpha)vt[14])(g_iba_mgr, 26, 255);
-        typedef void (*Enable)(int); ((Enable)kLayerHelper)(1); g_iba_layer = 1;
+        /* Layer 26 starts transparent; geometry_hold() makes it visible once the CIC has
+           stopped changing the rectangles (no flash of a wrong-sized picture). */
+        ((SetAlpha)vt[14])(g_iba_mgr, 26, 0);
+        typedef void (*Enable)(int); ((Enable)iba_a(kLayerHelper))(1); g_iba_layer = 1;
         g_iba.ack(op, 0, 1);
-        menu_hide_for_video();
+        if (screen_mode() != 0) menu_hide_for_video();   /* Normal keeps the CIC menu visible */
         return;
     }
     if (g_iba.stopping && !live_reap()) return;
@@ -623,7 +736,7 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
     if (op == IBA_STOP && g_iba_layer) {
         if (!iba_before("hide layer26")) return;
         menu_restore();
-        typedef void (*Enable)(int); ((Enable)kLayerHelper)(0); g_iba_layer = 0;
+        typedef void (*Enable)(int); ((Enable)iba_a(kLayerHelper))(0); g_iba_layer = 0;
         unsigned long* vt = *(unsigned long**)g_iba_mgr;
         typedef void (*SetAlpha)(void*, unsigned, unsigned);
         ((SetAlpha)vt[14])(g_iba_mgr, 26, g_iba_alpha);
@@ -636,16 +749,16 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
     typedef int (*Connection)(void*, unsigned short, unsigned short);
     typedef int (*VideoConnection)(void*, unsigned short, int, int);
     typedef int (*SinkRun)(void*, unsigned short);
-    if (op == IBA_AUDIO) rc = ((Connection)0x08b9d308UL)(iba_off(g_iba_cm, 0x6c8), (unsigned short)h, 0xc4);
-    else if (op == IBA_RELEASE) rc = ((Connection)0x08b9d460UL)(iba_off(g_iba_cm, 0x760), (unsigned short)h, 0xc4);
-    else if (op == IBA_CONNECT) rc = ((VideoConnection)0x08ce111cUL)(iba_off(g_iba_vcm, 0x6c8), (unsigned short)h, 8, 1);
-    else if (op == IBA_DISCONNECT) rc = ((VideoConnection)0x08ce135cUL)(iba_off(g_iba_vcm, 0x760), (unsigned short)h, 8, 1);
+    if (op == IBA_AUDIO) rc = ((Connection)iba_a(0x08b9d308UL))(iba_off(g_iba_cm, 0x6c8), (unsigned short)h, 0xc4);
+    else if (op == IBA_RELEASE) rc = ((Connection)iba_a(0x08b9d460UL))(iba_off(g_iba_cm, 0x760), (unsigned short)h, 0xc4);
+    else if (op == IBA_CONNECT) rc = ((VideoConnection)iba_a(0x08ce111cUL))(iba_off(g_iba_vcm, 0x6c8), (unsigned short)h, 8, 1);
+    else if (op == IBA_DISCONNECT) rc = ((VideoConnection)iba_a(0x08ce135cUL))(iba_off(g_iba_vcm, 0x760), (unsigned short)h, 8, 1);
     else if (op == IBA_START) {
         typedef int (*SetSource)(void*, int, unsigned char);
         g_iba_source_changed = 1;
-        rc = ((SetSource)0x08ce48e0UL)(iba_off(g_iba_sink, 0xc80), 8, 0);
-        if (rc) rc = ((SinkRun)0x08ce40e4UL)(iba_off(g_iba_sink, 0xa48), (unsigned short)h);
-    } else if (op == IBA_STOP) rc = ((SinkRun)0x08ce42c0UL)(iba_off(g_iba_sink, 0xae0), (unsigned short)h);
+        rc = ((SetSource)iba_a(0x08ce48e0UL))(iba_off(g_iba_sink, 0xc80), 8, 0);
+        if (rc) rc = ((SinkRun)iba_a(0x08ce40e4UL))(iba_off(g_iba_sink, 0xa48), (unsigned short)h);
+    } else if (op == IBA_STOP) rc = ((SinkRun)iba_a(0x08ce42c0UL))(iba_off(g_iba_sink, 0xae0), (unsigned short)h);
     alog_val(kIbaNames[op], rc);
     if (!rc) g_iba.ack(op, h, 0);
 }
@@ -669,22 +782,19 @@ static unsigned long g_iba_run_vt[12];
 static const unsigned long kExecVptr = 0x0922d2b8UL, kExecLoop = 0x08d5fce4UL;
 typedef void* (*IbaCurrentPU)();
 static void iba_capture_pu() {
-    for (unsigned i = 0; i < sizeof(kIbaMarshalSigs) / sizeof(kIbaMarshalSigs[0]); ++i) {
-        const unsigned char* b = (const unsigned char*)kIbaMarshalSigs[i].address;
-        for (unsigned j = 0; j < 32; ++j) if (b[j] != kIbaMarshalSigs[i].bytes[j]) return;
-    }
-    void* pu = ((IbaCurrentPU)0x08d5c528UL)();
+    if (!iba_profile_select()) return;
+    void* pu = ((IbaCurrentPU)iba_a(0x08d5c528UL))();
     if (!pu) return;
     unsigned long* ex = *(unsigned long**)iba_off(pu, 0x3c8);
-    if ((unsigned long)ex != kExecVptr || ex[5] != kExecLoop) return;
+    if ((unsigned long)ex != iba_a(kExecVptr) || ex[5] != iba_a(kExecLoop)) return;
     g_iba_pu = pu; g_iba_marshal_ok = 1;
 }
 static void iba_cb(void* epoch, int, void* runnable) {
     pthread_mutex_lock(g_iba_queue_mtx);
     if ((unsigned long)epoch != g_iba_epoch || auto_is_shutdown()) { g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx); return; }
     pthread_mutex_unlock(g_iba_queue_mtx);
-    int pu_ok = pthread_self() == g_hmi_tid && runnable == (void*)g_iba_run && ((IbaCurrentPU)0x08d5c528UL)() == g_iba_pu;
-    if (!pu_ok) { g_iba_msg = "Hilo HMI no verificado"; auto_fail_control("Hilo del CIC no verificado."); }
+    int pu_ok = pthread_self() == g_hmi_tid && runnable == (void*)g_iba_run && ((IbaCurrentPU)iba_a(0x08d5c528UL))() == g_iba_pu;
+    if (!pu_ok) { g_iba_msg = "HMI thread not verified"; auto_fail_control("CIC thread not verified."); }
     else { g_iba_tid = pthread_self(); auto_tick(g_app); }
     pthread_mutex_lock(g_iba_queue_mtx); g_iba_pending = 0; pthread_mutex_unlock(g_iba_queue_mtx);
 }
@@ -697,7 +807,7 @@ static int iba_queue() {
     g_iba_run[0] = (unsigned long)g_iba_run_vt;
     g_iba_pending = 1;
     typedef int (*Add)(void*, void*, void*, int, void*);
-    int id = ((Add)0x08d5f9a4UL)(iba_off(g_iba_pu, 0x3c8), (void*)g_iba_epoch, (void*)&iba_cb, 0, (void*)g_iba_run);
+    int id = ((Add)iba_a(0x08d5f9a4UL))(iba_off(g_iba_pu, 0x3c8), (void*)g_iba_epoch, (void*)&iba_cb, 0, (void*)g_iba_run);
     if (id == -1) g_iba_pending = 0;
     pthread_mutex_unlock(g_iba_queue_mtx);
     return id != -1;
@@ -739,16 +849,16 @@ struct NativeBackend {
     bool held() { return g_dsp_pid || g_iba_layer || g_iba_source_changed || g_iba.owns_resources() || g_iba.pending(); }
     bool busy() { return held() || g_iba_restore_failed || g_iba_suspended; }
     bool unlimited() { return true; }
-    bool preflight(int) { if (!file_exists(AAP_LIVE)) { message("Falta cicaalive instalado."); return false; } return true; }
+    bool preflight(int) { if (!file_exists(AAP_LIVE)) { message("cicaalive not installed."); return false; } return true; }
     void select(int) {}
     void prepare() { iba_check(app); }
     bool restart() { iba_restart(); return g_iba.untouched() != 0; }
     void step(int stopping, long) { iba_do(app, stopping); }
-    const char* last_message() { return g_iba_msg[0] ? g_iba_msg : "No se pudo completar la operacion."; }
+    const char* last_message() { return g_iba_msg[0] ? g_iba_msg : "Could not complete the operation."; }
     void message(const char* s) {
         /* AA video on screen -> open our TerminalUI page (iDrive keys come to us). */
-        if (str_eq(s, "Reproductor iniciado.")) { g_live_disp = 1; g_live_disp_ms = mono_ms(); alog("display ON"); app->triggerEvent(EVENT_OPEN_AA); }
-        else if (g_live_disp && (str_eq(s, "Detenido.") || str_eq(s, "Error; recursos liberados.") || str_eq(s, "Deteniendo y liberando recursos..."))) {
+        if (str_eq(s, "Player started.")) { g_live_disp = 1; g_live_disp_ms = mono_ms(); alog("display ON"); app->triggerEvent(EVENT_OPEN_AA); }
+        else if (g_live_disp && (str_eq(s, "Stopped.") || str_eq(s, "Error; resources released.") || str_eq(s, "Stopping and releasing resources..."))) {
             g_live_disp = 0; alog("display OFF");
             if (g_live_user) app->triggerEvent(EVENT_MAIN);
         }
@@ -768,13 +878,14 @@ static void auto_tick(bmw::PluginApp* app) {
     int command = g_auto_command; g_auto_command = 0; int abort = g_auto_abort;
     pthread_mutex_unlock(g_auto_mtx);
     NativeBackend b(app); long now = mono_ms();
-    if (abort) { g_auto_player.phase = AUTO_BLOCKED; auto_publish("El CIC no responde; reinicia el CIC."); }
+    if (abort) { g_auto_player.phase = AUTO_BLOCKED; auto_publish("CIC not responding; restart the CIC."); }
     else {
         if (command == 1) g_auto_player.begin(b, 0, now);
         else if (command == 4) g_auto_player.stop(b, now);
         g_auto_player.tick(b, now);
     }
     menu_hold(mono_ms());
+    geometry_hold(app);
     pthread_mutex_lock(g_auto_mtx);
     g_auto_need_tick = !g_auto_abort && g_auto_player.active();
     pthread_mutex_unlock(g_auto_mtx);
@@ -789,11 +900,11 @@ static void* auto_worker(void*) {
             if (!waiting) waiting = mono_ms();
             if ((unsigned long)(mono_ms() - waiting) > 15000UL) {
                 pthread_mutex_lock(g_auto_mtx); g_auto_abort = 1; g_auto_need_tick = 0; g_auto_command = 0; pthread_mutex_unlock(g_auto_mtx);
-                auto_publish("El CIC no responde."); finish = 1;
+                auto_publish("CIC not responding."); finish = 1;
             }
         } else if (!finish) {
             waiting = 0;
-            if (!iba_queue()) { if (++queue_failed >= 4) { auto_publish("No se puede comunicar con el CIC."); finish = 1; } }
+            if (!iba_queue()) { if (++queue_failed >= 4) { auto_publish("Cannot communicate with the CIC."); finish = 1; } }
             else queue_failed = 0;
         }
         if (finish) {
@@ -845,7 +956,7 @@ static int dsp_patch_ensure() {
     int st = -1;
     if (pid > 0) { for (int i = 0; i < 40 && waitpid(pid, &st, WNOHANG) != pid; ++i) { struct timespec t = {0, 50000000}; nanosleep(&t, 0); } }
     if (pid > 0 && st == 0) { alog("DSP patch already linked"); return 1; }
-    if (!file_exists(AAP_DSP_IMG)) { alog("DSP image missing (reinstalar)"); return 0; }
+    if (!file_exists(AAP_DSP_IMG)) { alog("DSP image missing (reinstall)"); return 0; }
     pid = spawnl(P_NOWAIT, AAP_DSPLOAD, AAP_DSPLOAD, "on", AAP_DSP_IMG, (char*)0);
     if (pid <= 0) { alog("DSP patch: spawn failed"); return 0; }
     st = -1;
@@ -857,8 +968,11 @@ static int dsp_patch_ensure() {
     return st == 0;
 }
 static volatile unsigned* g_ring = 0;
-static unsigned g_ring_base = 0xffffffffu;
-/* 1 when libcicaa has published SPS/PPS and a new frame this session. */
+/* 1 when libcicaa has published SPS/PPS (cfg_len > 0) for the running session.
+ * 1.0 also waited for a NEW frame after the display stop. Android Auto sends no frame
+ * while the screen does not change, so after OPTION/MENU -> Connect the picture often
+ * did not come back until the map moved. cicaalive asks for an IDR when it attaches
+ * (want_idr), and libcicaa now answers that request at once (input_drain). */
 static int live_video_ready() {
     if (!g_ring) {
         int fd = shm_open("/cicaa_live", 0 /* O_RDONLY */);
@@ -870,14 +984,14 @@ static int live_video_ready() {
     }
     /* ring_hdr: magic[0] size[1] wpos[2] rpos[3] reader_pid[4] want_idr[5] cfg_gen[6] cfg_len[7] frames_in[8] */
     if (g_ring[0] != 0x4c495631u) return 0;
-    if (g_ring_base == 0xffffffffu) { g_ring_base = g_ring[8]; return 0; }
-    return g_ring[7] > 0 && g_ring[8] != g_ring_base;
+    return g_ring[7] > 0;
 }
 static void status_show(bmw::PluginApp* app, const char* aa) {
-    char line[400], v[160], stage[160];
+    char line[400], v[160];
     pthread_mutex_lock(g_auto_mtx); copy_str(v, g_auto_text, sizeof v); pthread_mutex_unlock(g_auto_mtx);
+    char stage[160];
     unsigned n = put_str(line, 0, aa ? tr_stage(aa, stage, sizeof stage) : "");
-    if (v[0] && !str_eq(v, "Reproductor iniciado.")) { n = put_str(line, n, " | "); n = put_str(line, n, tr(v)); }
+    if (v[0] && !str_eq(v, "Player started.")) { n = put_str(line, n, " | "); n = put_str(line, n, tr(v)); }
     line[n] = 0;
     ui(app, MODEL_STATUS, line);
 }
@@ -885,9 +999,9 @@ static void* aa_poll_thread(void*) {
     bmw::PluginApp* app = g_app;
     char st[96];
     int live_req = 0;
-    g_ring_base = 0xffffffffu; g_live_user = 1; keymap_load();
+    g_live_user = 1; keymap_load();
     alog("=== AA session ===");
-    if (!dsp_patch_ensure()) { ui(app, MODEL_STATUS, "No se pudo cargar el DSP parcheado (reinstalar)"); }
+    if (!dsp_patch_ensure()) { ui(app, MODEL_STATUS, "Could not load the patched DSP (reinstall)"); }
     while (app) {
         sleep(1);
         status_show(app, snap(g_aa_status(), st, sizeof st));
@@ -897,7 +1011,7 @@ static void* aa_poll_thread(void*) {
             live_req = 1; alog("AA video -> start display"); auto_request(1);
         } else if (!want && live_req) {
             live_req = 0; alog(proj ? "user left AA -> stop display" : "AA exit -> stop display");
-            auto_request(4); g_ring_base = 0xffffffffu;
+            auto_request(4);
         }
         if (!g_aa_busy()) break;
     }
@@ -907,23 +1021,30 @@ static void* aa_poll_thread(void*) {
     g_aa_polling = 0;
     return 0;
 }
+static void location_activate(bmw::PluginApp* app);
+static void keys_install();
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
-    lang_refresh();
+    status_line(app);
+    location_activate(app);
+    keys_install();
     if (g_aa_polling) {             /* AA running in background -> bring it back */
         g_live_user = 1;
         if (g_aa_proj && !g_aa_proj() && g_aa_project) g_aa_project();
-        ui(app, MODEL_STATUS, "Volviendo a Android Auto...");
+        /* Start the display right here as well: if the poll thread's earlier request was
+           dropped (worker still closing after a quick OPTION -> Connect), pressing Connect
+           again now always brings AA back. auto_request() ignores it while busy. */
+        if (!g_live_disp && live_video_ready()) auto_request(1);
         return true;
     }
     if (auto_busy_control() || g_iba.owns_resources() || g_iba_layer || g_iba_source_changed) {
-        ui(app, MODEL_STATUS, "Cerrando video anterior, espera unos segundos");
+        ui(app, MODEL_STATUS, "Closing previous video, wait a few seconds");
         return true;
     }
     if (!g_aa_start) {
-        if (!file_exists(AAP_LIB)) { ui(app, MODEL_STATUS, "Falta libcicaa.so (instalar)"); return true; }
+        if (!file_exists(AAP_LIB)) { ui(app, MODEL_STATUS, "libcicaa.so missing (install)"); return true; }
         void* h = dlopen(AAP_LIB, 2 /* RTLD_NOW */);
-        if (!h) { ui(app, MODEL_STATUS, "No se pudo cargar libcicaa.so"); return true; }
+        if (!h) { ui(app, MODEL_STATUS, "Could not load libcicaa.so"); return true; }
         g_aa_start = (fn_int)dlsym(h, "cicaa_start");
         g_aa_busy = (fn_int)dlsym(h, "cicaa_busy");
         g_aa_status = (fn_str)dlsym(h, "cicaa_status");
@@ -935,24 +1056,202 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     }
     if (g_logs) mkdir(AAP_LOGDIR, 0755);
     int rc = g_aa_start();
-    if (rc != 0) { ui(app, MODEL_STATUS, rc == 1 ? "Ya en marcha" : "Error arrancando AA"); return true; }
+    if (rc != 0) { ui(app, MODEL_STATUS, rc == 1 ? "Already running" : "Error starting AA"); return true; }
     g_aa_polling = 1;
-    if (spawn(&aa_poll_thread) != 0) { g_aa_polling = 0; ui(app, MODEL_STATUS, "Error creando hilo"); return true; }
-    ui(app, MODEL_STATUS, "Conecta el movil por USB...");
+    if (spawn(&aa_poll_thread) != 0) { g_aa_polling = 0; ui(app, MODEL_STATUS, "Error creating thread"); return true; }
+    ui(app, MODEL_STATUS, "Connect the phone via USB...");
     return true;
 }
-static void logs_show(bmw::PluginApp* app) { ui(app, MODEL_LOGS, g_logs ? "ON (" AAP_LOGDIR ")" : "OFF"); }
+/* The one status line of the page: "Screen: Normal | BT Audio" (" | Logs ON" instead of
+ * the audio mode while logging). Refreshed when the page opens (also via a programmed
+ * favourite button), on Connect and after every button press. It also re-reads the
+ * audio mode for the next display start. */
+static void status_line(bmw::PluginApp* app) {
+    static const char* const kMode[3] = {"Normal", "Fullscreen", "Stretched"};
+    g_iba_keep_audio = file_exists(AAP_AAUDIO_ON);
+    lang_refresh();
+    char b[128]; unsigned n = put_str(b, 0, tr("Screen: "));
+    n = put_str(b, n, tr(kMode[screen_mode()]));
+    if (g_logs) n = put_str(b, n, tr(" | Logs ON"));
+    else n = put_str(b, n, g_iba_keep_audio ? " | AA Audio" : " | BT Audio");
+    b[n] = 0;
+    ui(app, MODEL_SCREEN, b);
+}
+static bool onPageFocus(void* obj, const KeyMap&) { status_line(static_cast<bmw::PluginApp*>(obj)); return false; }
+/* Disconnect: ask libcicaa to end the AA session properly (ByeByeRequest). The phone
+ * closes AA, the poll thread sees the session end and stops the display. A later
+ * Connect works without re-plugging the cable (libcicaa V59/V60). */
+static bool onDisconnect(void*, const bmw::Parcel&) {
+    if (g_aa_busy && g_aa_busy() && g_aa_input) { g_aa_input(CICAA_IN_BYEBYE, 0, 0); alog("Disconnect pressed"); }
+    return true;
+}
+/* Switch Audio: BT Audio <-> AA Audio (aaaudio.on). The media channel is only announced
+ * at service discovery, so a running session is ended (like Disconnect); the next
+ * Connect uses the new mode. */
+static bool onSwitchAudio(void* obj, const bmw::Parcel& p) {
+    if (file_exists(AAP_AAUDIO_ON)) unlink(AAP_AAUDIO_ON);
+    else { int f = open(AAP_AAUDIO_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+    status_line(static_cast<bmw::PluginApp*>(obj));
+    return onDisconnect(obj, p);
+}
+static bool onZoom(void* obj, const bmw::Parcel&) {
+    screen_mode_next();
+    status_line(static_cast<bmw::PluginApp*>(obj));
+    return true;
+}
 static bool onLogs(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
-    lang_refresh();
     if (g_logs) { unlink(AAP_LOGS_ON); g_logs = 0; }
     else {
         mkdir(AAP_LOGDIR, 0755);
         int f = open(AAP_LOGS_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (f >= 0) { close(f); g_logs = 1; alog("=== logs ON, AAPlugin " AAP_VERSION " ==="); }
     }
-    logs_show(app);
+    status_line(app);
     return true;
+}
+
+/* ======================= CIC position -> phone ======================= */
+/* AAPlugin.xml: <raDataRequestModel id="230" modelType="vehicle.location" />. The names
+ * are the RHMI ones of this HmiMain (CLocationProvider; others: vehicle.speed,
+ * vehicle.acceleration, vehicle.mileage_in_km, vehicle.tankrange, mmi.units, ...). The
+ * value arrives as a wide string "lat,lon" in CIC units (2^32 = 360 degrees), about once
+ * per second, also in an underground car park (dead reckoning), "0,0" right after a CIC
+ * start. Like the Today/PIM apps: handler registered at create, the update activated
+ * on Connect.
+ * The PluginApp/Parcel/BasicString<ushort> functions are looked up with dlsym, exactly
+ * as in the build tested in the car: if a firmware lacks one of them the plugin still
+ * loads and only the position forwarding is off. */
+enum { DATA_LOCATION = 230 };
+typedef void (*AddDataUpdateHandler)(bmw::PluginApp*, unsigned, const Handler&);
+typedef void (*ActivateDataUpdate)(bmw::PluginApp*, unsigned, bool);
+typedef bool (*ReadWString)(const bmw::Parcel*, void*);
+typedef void (*WStringFn)(void*);
+typedef const unsigned short* (*WStringCStr)(const void*);
+static struct { ActivateDataUpdate activate; ReadWString read; WStringFn ctor, dtor; WStringCStr c_str; int ok; } g_vd;
+static unsigned g_gps_n = 0;
+static long g_gps_log_ms = 0;
+static int parse_int(const char** p, int* v) {
+    const char* s = *p; int neg = 0, any = 0; unsigned u = 0;
+    if (*s == '-') { neg = 1; ++s; }
+    while (*s >= '0' && *s <= '9') { u = u * 10 + (unsigned)(*s++ - '0'); any = 1; }
+    *v = neg ? -(int)u : (int)u; *p = s; return any;
+}
+static bool onLocation(void*, const bmw::Parcel& parcel) {
+    unsigned ws[4] = {0, 0, 0, 0};          /* bmw::BasicString<unsigned short> (one pointer) */
+    char text[64]; unsigned n = 0;
+    ++g_gps_n;
+    g_vd.ctor(ws);
+    const unsigned short* w = g_vd.read(&parcel, ws) ? g_vd.c_str(ws) : 0;
+    for (; w && w[n] && n + 1 < sizeof text; ++n) text[n] = (char)w[n];
+    text[n] = 0;
+    g_vd.dtor(ws);
+    if (g_logs && (unsigned long)(mono_ms() - g_gps_log_ms) >= 1000UL) {
+        char b[96]; unsigned k = put_str(b, 0, "GPS n="); k = put_int(b, k, (int)g_gps_n);
+        k = put_str(b, k, " "); k = put_str(b, k, w ? text : "(read failed)"); b[k] = 0;
+        alog(b); g_gps_log_ms = mono_ms();
+    }
+    const char* p = text; int lat, lon;
+    if (!w || !parse_int(&p, &lat) || *p++ != ',' || !parse_int(&p, &lon)) return true;
+    if (!lat && !lon) return true;           /* no position yet (right after a CIC start) */
+    if (g_aa_input && g_aa_busy && g_aa_busy()) g_aa_input(CICAA_IN_LOCATION, lat, lon);
+    return true;
+}
+static void location_init(bmw::PluginApp* app) {
+    void* self = dlopen(0, 2);
+    AddDataUpdateHandler add = 0;
+    if (self) {
+        add = (AddDataUpdateHandler)dlsym(self, "_ZN3bmw9PluginApp20addDataUpdateHandlerEjRKNS_8DelegateIbRKNS_6ParcelEvvvEE");
+        g_vd.activate = (ActivateDataUpdate)dlsym(self, "_ZN3bmw9PluginApp18activateDataUpdateEjb");
+        g_vd.read = (ReadWString)dlsym(self, "_ZNK3bmw6Parcel11readWStringERNS_11BasicStringItEE");
+        g_vd.ctor = (WStringFn)dlsym(self, "_ZN3bmw11BasicStringItEC1Ev");
+        g_vd.dtor = (WStringFn)dlsym(self, "_ZN3bmw11BasicStringItED1Ev");
+        g_vd.c_str = (WStringCStr)dlsym(self, "_ZNK3bmw11BasicStringItE5c_strEv");
+    }
+    if (add && g_vd.activate && g_vd.read && g_vd.ctor && g_vd.dtor && g_vd.c_str) {
+        Handler h; h.object = app; h.stub = &onLocation;
+        add(app, DATA_LOCATION, h);
+        g_vd.ok = 1;
+    }
+    alog_val("GPS data update", g_vd.ok);
+}
+static void location_activate(bmw::PluginApp* app) {
+    if (g_vd.ok) g_vd.activate(app, DATA_LOCATION, true);
+}
+
+/* ======================= steering-wheel / panel skip keys -> phone ======================= */
+/* In AA Audio mode the music comes from the phone over USB, but the CIC sends the skip
+ * keys to its own active entertainment source: they never reach the plugin (TerminalUI
+ * only gets the controller). HmiMain exports the proxy classes by name, so the plugin
+ * replaces one entry of their vtables (in HmiMain's writable data, no code is patched):
+ *   CPxyControlElementsMFL::CSearchSwitch1   steering-wheel search keys
+ *   CPxyCECenterStack::CPushButtonSkip       |<< >>| under the CD/DVD slot
+ * vtable[8] is the message handler (this, msg). The hook calls the original first (the
+ * CIC behaves exactly as before), then reads the key state with the class getter
+ * (this, int*): 1 / 2 = pressed, 0 = released, every state arrives twice.
+ * Steering wheel: 1 = next, 2 = previous. Panel: 1 = previous, 2 = next.
+ * Only in AA Audio mode and while a session runs, the state goes to the phone as media
+ * key 87 NEXT / 88 PREVIOUS (down, then up on release); duplicates are dropped. In BT
+ * Audio mode nothing is sent: the CIC's Bluetooth source gets the keys as always.
+ * Safety: installed at the first Connect (not at create, so a mistake cannot cause a
+ * boot loop), only if the vtable entry and the first 12 bytes of the getter match the
+ * running HmiMain (addresses written for 9283417A, translated by iba_a() for the other
+ * known builds); restored in aap_destroy. */
+typedef int (*MsgHandler)(void*, void*);
+typedef void (*KeyGetter)(void*, int*);
+static const unsigned long kKeyGetterSig[3] = {0x2f962f86UL, 0x2fe62fc6UL, 0xc70e4f22UL};
+struct KeyHook {
+    const char* vtable; unsigned long orig, getter; MsgHandler hook;
+    unsigned long* slot; const char* tag;
+};
+static int key_hook_mfl(void*, void*);
+static int key_hook_panel(void*, void*);
+static KeyHook g_kh[2] = {
+    {"_ZTVN22CPxyControlElementsMFL14CSearchSwitch1E", 0x08ba0bb0UL, 0x08ba0b60UL, &key_hook_mfl, 0, "KEY mfl"},
+    {"_ZTVN17CPxyCECenterStack15CPushButtonSkipE", 0x08b935dcUL, 0x08b9358cUL, &key_hook_panel, 0, "KEY panel"},
+};
+static int g_keys_tried = 0, g_key_held = 0;
+static void key_forward(int v) {
+    if (!g_iba_keep_audio || !g_aa_input || !g_aa_busy || !g_aa_busy()) return;
+    int code = v == 1 ? 87 : v == 2 ? 88 : 0;             /* KEYCODE_MEDIA_NEXT / _PREVIOUS */
+    if (!code) {                                           /* released */
+        if (v == 0 && g_key_held) { g_aa_input(CICAA_IN_KEY, g_key_held, 0); g_key_held = 0; }
+        return;
+    }
+    if (code == g_key_held) return;                        /* repeated state */
+    if (g_key_held) g_aa_input(CICAA_IN_KEY, g_key_held, 0);
+    g_aa_input(CICAA_IN_KEY, code, 1);
+    g_key_held = code;
+}
+static int key_hook(int which, void* self, void* msg) {
+    int rc = ((MsgHandler)g_kh[which].orig)(self, msg);   /* CIC first, unchanged */
+    int v = -1;
+    ((KeyGetter)g_kh[which].getter)(self, &v);
+    alog_val(g_kh[which].tag, v);
+    if (which == 1 && (v == 1 || v == 2)) v = 3 - v;      /* panel: 1 = previous, 2 = next */
+    key_forward(v);
+    return rc;
+}
+static int key_hook_mfl(void* self, void* msg) { return key_hook(0, self, msg); }
+static int key_hook_panel(void* self, void* msg) { return key_hook(1, self, msg); }
+static void keys_install() {
+    if (g_keys_tried) return;
+    g_keys_tried = 1;
+    iba_profile_select();                                  /* iba_a() needs the build profile */
+    void* self = dlopen(0, 2);
+    for (int k = 0; k < 2; ++k) {
+        KeyHook& h = g_kh[k];
+        unsigned long* vt = self ? (unsigned long*)dlsym(self, h.vtable) : 0;
+        unsigned long* slot = vt ? vt + 8 : 0;             /* vtable symbol + 32 bytes */
+        h.orig = iba_a(h.orig); h.getter = iba_a(h.getter);  /* this HmiMain build */
+        const unsigned long* g = (const unsigned long*)h.getter;
+        int ok = slot && *slot == h.orig && g[0] == kKeyGetterSig[0] && g[1] == kKeyGetterSig[1] && g[2] == kKeyGetterSig[2];
+        if (ok) { h.slot = slot; *slot = (unsigned long)h.hook; }   /* one aligned store */
+        alog_val(k ? "keys panel hook" : "keys mfl hook", ok ? 1 : slot ? (int)*slot : 0);
+    }
+}
+static void keys_restore() {
+    for (int k = 0; k < 2; ++k) if (g_kh[k].slot) { *g_kh[k].slot = g_kh[k].orig; g_kh[k].slot = 0; }
 }
 
 extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
@@ -962,11 +1261,16 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     if (!app) return 0;
     g_logs = file_exists(AAP_LOGS_ON);
     add(app, ACTION_CONNECT, &onConnect);
+    add(app, ACTION_DISCONNECT, &onDisconnect);
+    add(app, ACTION_ZOOM, &onZoom);
+    add(app, ACTION_AUDIO, &onSwitchAudio);
     add(app, ACTION_LOGS, &onLogs);
-    add(app, ACTION_AA_BACK, &onAaBack);
-    KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus};
+    KeyHandler keys = {app, &onKeys}, focus = {app, &onFocus}, page = {app, &onPageFocus};
     app->addHandlerWithMap(AA_KEYS, keys);
     app->addHandlerWithMap(AA_SCREEN, 1, focus);
+    app->addHandlerWithMap(PAGE_MAIN, 1, page);         /* page opened -> fresh status line */
+    app->addHandlerWithMap(PAGE_MAIN_FIRST, 1, page);
+    location_init(app);
     g_hmi_tid = pthread_self();
     g_ui_ready = (pthread_mutex_init(g_ui_mtx, 0) == 0);
     g_app = app;
@@ -978,9 +1282,10 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
 
 extern "C" void aap_destroy(void* app) {
     if (!app) return;
+    keys_restore();
     auto_runtime_shutdown();
     if (g_iba_target_live && pthread_self() == g_iba_tid) {
-        typedef void (*Dtor)(void*); ((Dtor)0x08d6ed6cUL)(g_iba_target); g_iba_target_live = 0;
+        typedef void (*Dtor)(void*); ((Dtor)iba_a(0x08d6ed6cUL))(g_iba_target); g_iba_target_live = 0;
     }
     g_app = 0;
     typedef void (*DeletingDestructor)(void*);

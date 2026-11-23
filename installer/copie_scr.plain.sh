@@ -8,6 +8,7 @@
 #       HDD   /mnt/hbdebug/aap : libcicaa.so cicaalive dspload hu.crt hu.key
 #                                dvd_dm642_aa.bin (patched from the car's own DSP image)
 #       flash /mnt/EFS_RO/Hmi/data/ro/Plugins/AAP : AAPlugin.so .xml .manifest
+#       alt   /mnt/hbuser/*/ro/Plugins/AAP (if present) : AAPlugin.xml .manifest
 #  3. Removes the old development plugin (Plugins/CMD with CicMenuDemo.so),
 #     backing it up to the stick (AALEGACY/).
 #  4. Reboots the CIC only if something changed (so it never loops).
@@ -65,21 +66,31 @@ if [ -f "$USB/AAHU.CRT" ] && [ -f "$USB/AAHU.KEY" ]; then
 elif [ ! -f "$DIR/hu.crt" ]; then
  echo "WARNING no AAHU.CRT/AAHU.KEY on the stick and none installed: Android Auto will not connect"
 fi
-# Optional settings from the stick root (geom.txt, keymap.txt, vlead_ms.txt, any
-# letter case). A file whose first word is "default" removes the setting.
+# Optional settings from the stick root (geom.txt, keymap.txt, vlead_ms.txt,
+# video.txt, driver.txt, gps.txt, any letter case).
+# File on the stick -> installed; not on the stick (or first word "default") -> the
+# copy on the CIC is removed and the built-in default applies.
+# geom.txt overrides the built-in geometry (Zoom Mode button) when present.
 # Settings are read at each AA start: they never trigger a reboot.
-for N in geom keymap vlead_ms; do
+for N in geom keymap vlead_ms video driver gps; do
  typeset -u U=$N
+ F=
  for S in "$USB/$N.txt" "$USB/$N.TXT" "$USB/$U.TXT"; do
-  [ -f "$S" ] || continue
-  read W < "$S"
-  case "$W" in
-  default*) rm -f "$DIR/$N.txt"; echo "SETTING_REMOVED $N.txt"; break;;
-  esac
-  if "$V" verify "$DIR/$N.txt" "$S"; then echo "SETTING_SAME $N.txt"
-  else cp "$S" "$DIR/$N.txt" && echo "SETTING_INSTALLED $N.txt: $W"; fi
-  break
+  [ -f "$S" ] && { F=$S; break; }
  done
+ if [ -z "$F" ]; then
+  [ -f "$DIR/$N.txt" ] && { rm -f "$DIR/$N.txt"; echo "SETTING_REMOVED $N.txt (not on stick -> built-in default)"; }
+  continue
+ fi
+ read W < "$F"
+ case "$W" in
+ default*) rm -f "$DIR/$N.txt"; echo "SETTING_REMOVED $N.txt"; continue;;
+ esac
+ if "$V" verify "$DIR/$N.txt" "$F"; then echo "SETTING_SAME $N.txt"
+ else cp "$F" "$DIR/$N.txt" && echo "SETTING_INSTALLED $N.txt: $W"; fi
+done
+for N in geomzoom geomwide; do
+ [ -f "$DIR/$N.txt" ] && { rm -f "$DIR/$N.txt"; echo "SETTING_REMOVED $N.txt (geometry is built in)"; }
 done
 # DSP image: always rebuilt from the car's own copy, installed only if different
 "$V" patch /tmp/aap_dsp.bin || { echo DSP_PATCH_FAILED_UNKNOWN_DSP_IMAGE; flush; exit 83; }
@@ -123,6 +134,16 @@ if [ "$PCHG" = 1 ] || [ "$LCHG" = 1 ]; then
 else
  echo PLUGIN_SAME
 fi
+# ---- 2c. alternative HmiMain from /mnt/hbuser (e.g. F30 Rev 76617, run with
+# -ro=/mnt/hbuser/f30/ro): it reads plugin manifests from its own ro/Plugins.
+# The manifest points to the flash .so, so only .xml/.manifest are needed.
+# Skipped when that folder does not exist.
+for ALT in /mnt/hbuser/*/ro/Plugins; do
+ [ -d "$ALT" ] || continue
+ mkdir -p "$ALT/AAP" || { echo "ALT_DIR_FAIL $ALT"; continue; }
+ for S in xml manifest; do inst "$PAY/AAPlugin.$S" "$ALT/AAP/AAPlugin.$S" 644; done
+ ls -l "$ALT/AAP"
+done
 ls -l "$TARGET" "$DIR"
 flush
 if [ "$CHANGED" = 1 ]; then

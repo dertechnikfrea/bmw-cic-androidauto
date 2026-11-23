@@ -25,10 +25,14 @@ Problemas conocidos: algún corte o congelación breve de imagen cuando el DSP v
 
 ## Compatibilidad
 
-* **Solo CIC HIGH con HmiMain 9283417A, es decir, software del CIC versión C1A** (probado en un E9x). El plugin llama a
-  funciones internas de HmiMain por dirección fija; antes de usarlas compara su
-  código con firmas. Si tu HmiMain es otro, el plugin no toca nada y muestra
-  "HmiMain distinto: no compatible".
+* **Solo CIC HIGH con software del CIC versión C1A.** El plugin llama a funciones
+  internas de HmiMain por dirección fija; antes de usarlas compara su código con
+  firmas. Versiones de HmiMain conocidas (`src/plugin/iba_profiles.h`):
+  * 9283417A, probada en un E9x (las direcciones del código son de esta versión);
+  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, probada en un E60 LCI.
+
+  Si tu HmiMain es otra versión, el plugin no toca nada y muestra
+  "HmiMain distinto: no compatible"; ver [Otras versiones de HmiMain](#otras-versiones-de-hmimain).
 * Imagen DSP `dvd_dm642.bin` de 2363004 bytes (la que acompaña ese firmware). El
   instalador comprueba los bytes exactos antes de parchear.
 * NBT / EVO / CIC MID no están soportados.
@@ -37,20 +41,22 @@ Problemas conocidos: algún corte o congelación breve de imagen cuando el DSP v
 
 En **Multimedia → Android Auto** aparece una pantalla con:
 
-* **Android Auto**: arranca AA. Conecta el móvil al USB; en unos segundos
+* **Conectar Android Auto**: arranca AA. Conecta el móvil al USB; en unos segundos
   aparece AA. La ruleta, el pulsador y las direcciones del iDrive van al móvil.
-  La tecla **MENU** o el botón **Menu** te devuelven al coche sin cortar AA;
-  volver a pulsar *Android Auto* vuelve a AA.
-* **Logs**: activa o desactiva el registro. **Por defecto no se escribe
+  **MENU** o **Volver** te devuelven al coche sin cortar AA; volver a pulsar
+  *Conectar* vuelve a AA.
+* **Logs ON/OFF**: activa o desactiva el registro. **Por defecto no se escribe
   nada en ningún sitio.** Con logs ON se escribe en `/mnt/hbdebug/aap/logs/`; la
   próxima vez que arranques el CIC con el USB de instalación puesto, los logs se
   copian al USB (`AALOGS/`) y se borran del CIC.
-* **AA:** (estado): línea con lo que está pasando.
+* **Estado**: línea con lo que está pasando.
 
-Los textos de estado siguen el idioma configurado en el CIC (se lee del HMI en
-cada pulsación): español, inglés, alemán, francés, italiano, neerlandés y
-portugués; cualquier otro idioma usa inglés. Las etiquetas fijas de los botones
-son neutras.
+Los textos de estado siguen el idioma configurado en el CIC (se lee del HMI al abrir
+la página y en cada pulsación): inglés, español, alemán, francés, italiano,
+neerlandés y portugués; cualquier otro idioma usa inglés. Las etiquetas de los
+botones (fijas en el XML) quedan en inglés. Detectar el idioma requiere las
+direcciones del proxy MMI de esa versión de HmiMain: conocidas para E9x (9283417A);
+en otros perfiles los textos quedan en inglés hasta añadirlas.
 
 ## Instalación
 
@@ -157,6 +163,7 @@ privada: no lo publiques** (por ejemplo como release de GitHub).
 ```
 src/common/aap_paths.h      rutas, interruptores y valores por defecto (márgenes, geometría)
 src/plugin/                 plugin HMI (C++): UI, iDrive, ruta de vídeo nativa, arranque
+src/plugin/iba_profiles.h   tablas de direcciones para versiones de HmiMain distintas de 9283417A
 src/libcicaa/               protocolo Android Auto (USB/AOA, TLS, canales) -> anillos shm
 src/cicaalive/              proceso que alimenta el DSP DM642 (H.264 + AAC) por dspipc
 src/dspload/                parche/carga de la imagen DSP, verificación y reinicio
@@ -165,6 +172,7 @@ tools/build.py              compila todo y prepara el pendrive
 patches/                    nuestro parche a mbed TLS (se aplica a una copia al compilar)
 third_party/mbedtls         mbed TLS 3.6.7 (submódulo git)
 tools/encdec_sh.py          codificación de copie_scr.sh que espera el CIC
+tools/hmi_profile.py        busca las direcciones del plugin en otra versión de HmiMain
 docs/ARQUITECTURA.md        cómo funciona por dentro
 ```
 
@@ -176,10 +184,22 @@ siguiente arranque de AA). Un fichero cuya primera palabra sea `default` borra e
 ajuste. El plugin nunca los crea.
 
 * `geom.txt`: `sx sy sw sh dx dy dw dh`, recorte del vídeo y rectángulo en
-  pantalla. Por defecto `80 80 640 320 160 0 960 480`. Por ejemplo,
-  `80 80 640 320 0 0 1280 480` lo estira a todo el ancho.
+  pantalla. Si existe, sustituye la geometría integrada del botón Zoom Mode (Normal
+  `0 0 720 360 256 0 960 480`, Fullscreen `0 0 720 360 0 0 960 480`, Stretched
+  `0 0 720 360 0 0 1280 480`).
 * `keymap.txt`: líneas `tecla_cic tecla_android` (p. ej. `12 22`).
-* `vlead_ms.txt`: margen de vídeo en ms (por defecto 300; más alto, menos cortes
+* `video.txt`: `margen_ancho margen_alto [dpi]` que se piden al móvil (por defecto
+  `80 120 140`). Android Auto dibuja su interfaz en un área de
+  (800 - margen_ancho) x (480 - margen_alto) del vídeo de 800x480. Sin `video.txt`
+  esa área va en la esquina superior izquierda; con él el móvil la centra, así que
+  ajusta `geom.txt` a juego. Menos dpi = interfaz más pequeña, cabe más.
+  Márgenes mayores que `600 320` o dpi fuera de 60-400 se ignoran (quedan los valores
+  por defecto).
+* `driver.txt`: `right` para volante a la derecha (la barra de Android Auto pasa a la
+  derecha); por defecto izquierda.
+* `gps.txt`: `off` deja de mandar la posición del CIC al móvil (usa su propio GPS).
+  Por defecto activado: la navegación sigue la posición del coche (navegación a estima).
+* `vlead_ms.txt`: margen de vídeo en ms (por defecto 50; más alto, menos cortes
   y más retraso). **Experimental:** `nopts` o `pts-1` manda el vídeo sin marca de
   tiempo cuando el reloj del DSP ya corre: cada frame se muestra en cuanto se
   decodifica (mínimo retraso, nunca se descarta).
@@ -189,6 +209,45 @@ ajuste. El plugin nunca los crea.
   Prueba entre 250 y 400 con tu móvil. Una segunda palabra opcional `dbg100`
   (p. ej. `300 dbg100`) sube el nivel de depuración del DSP a 100 durante los
   primeros 8 s del reloj (solo diagnóstico, con los logs activados).
+
+### Pantalla completa con las proporciones correctas
+
+La pantalla del CIC es de 1280x480 (8:3) pero el área de AA por defecto es de 720x360
+(2:1), mostrada a 960x480. Para llenar la pantalla sin estirar, se pide al
+móvil un área 8:3 y se amplía. En un E60 LCI el escalador de vídeo del CIC solo acepta
+un origen de hasta unos 600 px de ancho (640 se corta por la derecha; 600 o menos
+llenan la pantalla), así que:
+
+* `video.txt`: `200 256 96` (área de 600x224; dpi 96 para que quepan la barra y las
+  tarjetas de AA);
+  Con `video.txt` el móvil centra su área, así que `geom.txt` debe recortarla;
+* `geom.txt`: `100 128 600 224 0 0 1280 480`.
+
+Se ve menos nítido (ampliación de unas 2,1 veces) y las listas muestran menos filas,
+pero ocupa toda la pantalla y los iconos redondos siguen redondos. Por telnet se
+pueden probar valores de `geom.txt` en vivo:
+`echo "100 128 600 224 0 0 1280 480" > /mnt/hbdebug/aap/geom.txt` y reconectar.
+
+## Otras versiones de HmiMain
+
+Otras versiones del software C1A contienen el mismo código de HmiMain desplazado
+unos KB. Para soportar una:
+
+1. Consigue su HmiMain. No es un fichero en el CIC en marcha: está en la segunda
+   imagen de arranque (`memifs2 -o 0x00740000` en `/etc/starter.cfg`). Por telnet,
+   copia la flash en bruto (solo lectura): `cp /dev/fs0 /fs/usb0/fs0.img`. Nunca
+   copies nada *a* `/dev/fs0*`.
+2. `python tools/hmi_profile.py --extract fs0.img HmiMain`
+3. `python tools/hmi_profile.py HmiMain --name "E.. ..."`: busca las 47 huellas de
+   código (ignorando las direcciones de los literal pools), resuelve las repetidas con
+   el desplazamiento de sus vecinas, mueve las direcciones de datos según el
+   desplazamiento medido y comprueba cada vtable por su nombre de tipo C++. No
+   imprime una tabla incompleta.
+4. Añade la salida a `src/plugin/iba_profiles.h`, renombra sus tablas `kXlat_X` /
+   `kSigFix_X` (p. ej. `kXlatE61`, `kSigFixE61`) y añade una línea a `kIbaProfiles`.
+
+En marcha, el plugin usa el primer perfil cuyas huellas coinciden todas; con los logs
+activados, `plugin.log` muestra `HmiMain profile ...`.
 
 ## Licencia
 
