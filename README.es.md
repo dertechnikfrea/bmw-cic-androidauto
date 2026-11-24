@@ -234,7 +234,8 @@ unos KB. Para soportar una:
    imagen de arranque (`memifs2 -o 0x00740000` en `/etc/starter.cfg`). Por telnet,
    copia la flash en bruto (solo lectura): `cp /dev/fs0 /fs/usb0/fs0.img`. Nunca
    copies nada *a* `/dev/fs0*`.
-2. `python tools/hmi_profile.py --extract fs0.img HmiMain`
+2. `python tools/hmi_profile.py --extract fs0.img HmiMain` (también sirve una copia de
+   la partición `/dev/fs0p2`)
 3. `python tools/hmi_profile.py HmiMain --name "E.. ..."`: busca las 47 huellas de
    código (ignorando las direcciones de los literal pools), resuelve las repetidas con
    el desplazamiento de sus vecinas, mueve las direcciones de datos según el
@@ -242,6 +243,14 @@ unos KB. Para soportar una:
    imprime una tabla incompleta.
 4. Añade la salida a `src/plugin/iba_profiles.h`, renombra sus tablas `kXlat_X` /
    `kSigFix_X` (p. ej. `kXlatE61`, `kSigFixE61`) y añade una línea a `kIbaProfiles`.
+
+Si el paso 3 da una huella como no encontrada o ambigua, o una dirección de datos que
+no puede comprobar, esa versión es más que una copia desplazada (otra versión del
+software del CIC). Busca esas direcciones a mano (desensamblado, volcado de memoria del
+HmiMain en marcha) y pásalas con `--pin 0xANTIGUA=0xNUEVA`: la herramienta completa
+entonces la tabla, toma las vtables de sus símbolos donde los datos no se movieron con
+un único desplazamiento y marca las líneas fijadas. También avisa de las huellas que
+tomó por su posición; revisa esas líneas.
 
 En marcha, el plugin usa el primer perfil cuyas huellas coinciden todas; con los logs
 activados, `plugin.log` muestra `HmiMain profile ...`.
