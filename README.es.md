@@ -25,11 +25,15 @@ Problemas conocidos: algún corte o congelación breve de imagen cuando el DSP v
 
 ## Compatibilidad
 
-* **Solo CIC HIGH con software del CIC versión C1A.** El plugin llama a funciones
+* **Solo CIC HIGH con software del CIC versión C1A o C16A.** El plugin llama a funciones
   internas de HmiMain por dirección fija; antes de usarlas compara su código con
   firmas. Versiones de HmiMain conocidas (`src/plugin/iba_profiles.h`):
   * 9283417A, probada en un E9x (las direcciones del código son de esta versión);
-  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, probada en un E60 LCI.
+  * `CIC_L6_1107_Release B1107-501-1121A Build 11`, probada en un E60 LCI;
+  * `CIC_L6_1103_Release B1103-500-1048A Build 43` (software del CIC C16A, E9x LCI):
+    probada en el coche con el binario de la versión 1.0 parcheado con estas
+    direcciones; las direcciones de las teclas skip y el perfil compilado desde el
+    código fuente aún no están probados.
 
   Si tu HmiMain es otra versión, el plugin no toca nada y muestra
   "HmiMain distinto: no compatible"; ver [Otras versiones de HmiMain](#otras-versiones-de-hmimain).
@@ -241,6 +245,12 @@ unos KB. Para soportar una:
 
 En marcha, el plugin usa el primer perfil cuyas huellas coinciden todas; con los logs
 activados, `plugin.log` muestra `HmiMain profile ...`.
+
+Otra versión del software del CIC es más que un desplazamiento. En C16A el código se
+movió por bloques en cantidades distintas (de 27 KB a 165 KB) y una de las 47
+funciones tiene código distinto, así que su huella no está en ese HmiMain y
+`hmi_profile.py` no puede generar la tabla. El perfil C16A se mapeó a mano; su tabla
+`SigFix` contiene los bytes de esa función en C16A.
 
 ## Licencia
 
