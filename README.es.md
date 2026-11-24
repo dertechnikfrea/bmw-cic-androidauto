@@ -257,9 +257,10 @@ activados, `plugin.log` muestra `HmiMain profile ...`.
 
 Otra versión del software del CIC es más que un desplazamiento. En C16A el código se
 movió por bloques en cantidades distintas (de 27 KB a 165 KB) y una de las 47
-funciones tiene código distinto, así que su huella no está en ese HmiMain y
-`hmi_profile.py` no puede generar la tabla. El perfil C16A se mapeó a mano; su tabla
-`SigFix` contiene los bytes de esa función en C16A.
+funciones tiene código distinto, así que su huella no está en ese HmiMain. El perfil
+C16A se mapeó primero a mano; ahora `hmi_profile.py` lo reproduce con tres `--pin`
+(`0x08d6ebbc`, `0x08d6ed6c`, `0x091fda28`). Su tabla `SigFix` contiene los bytes de esa
+función en C16A.
 
 ## Licencia
 

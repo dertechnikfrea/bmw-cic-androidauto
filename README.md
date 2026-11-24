@@ -245,9 +245,9 @@ logs ON, `plugin.log` shows `HmiMain profile ...`.
 
 Another CIC software version is more than a shift. In C16A the code moved in blocks
 by different amounts (27 KB to 165 KB) and one of the 47 functions has different
-code, so its fingerprint is not in that HmiMain and `hmi_profile.py` cannot build the
-table. The C16A profile was mapped by hand; its `SigFix` table holds the bytes of that
-function in C16A.
+code, so its fingerprint is not in that HmiMain. The C16A profile was first mapped by
+hand; `hmi_profile.py` now reproduces it with three `--pin` values (`0x08d6ebbc`,
+`0x08d6ed6c`, `0x091fda28`). Its `SigFix` table holds the bytes of that function in C16A.
 
 ## License
 
