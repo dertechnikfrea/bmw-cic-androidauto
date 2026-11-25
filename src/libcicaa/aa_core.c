@@ -269,11 +269,17 @@ static int read_small(const char *path, char *b, int size)
  * geom.txt "100 128 600 224 0 0 1280 480".
  * Margins above 600 x 320 (UI smaller than 200 x 160) or dpi outside 60..400 are
  * ignored and the defaults kept. Returns 1 when video.txt set the margins. */
+static int g_video_topleft;
 static int video_cfg(unsigned *mw, unsigned *mh, unsigned *dpi)
 {
     char b[64]; unsigned v[3]; int k = 0; const char *p = b;
-    *mw = AAP_MARGIN_W; *mh = AAP_MARGIN_H; *dpi = AAP_DPI;
+    *mw = AAP_MARGIN_W; *mh = AAP_MARGIN_H; *dpi = AAP_DPI; g_video_topleft = 1;
     if (!read_small(AAP_VIDEO_TXT, b, sizeof b)) return 0;
+    /* optional 4th word "topleft": keep the UI area in the top-left corner (ui_config) as
+       with the built-in margins. The DSP shows only the left 720 columns of the 800x480
+       stream, so a centred area can be at most ~600 px wide, a top-left one 720 px:
+       "80 210 116 topleft" + geom.txt "0 0 720 270 0 0 1280 480" = full screen, 8:3. */
+    g_video_topleft = strstr(b, "top") != 0;
     while (*p && k < 3) {
         while (*p && (*p < '0' || *p > '9')) ++p;
         if (!*p) break;
@@ -328,9 +334,9 @@ static int send_sd_response(aa_t *a)
     pb_u(&cfg, 1, 1); pb_u(&cfg, 2, 2); pb_u(&cfg, 3, mw); pb_u(&cfg, 4, mh); pb_u(&cfg, 5, dpi);
     /* VideoConfiguration field 11 ui_config { 1 margins { 2 bottom, 4 right } }: AA puts
        its UI area in the top-left corner instead of centring it. */
-    if (!vfile) {
+    if (!vfile || g_video_topleft) {
         pb_t ins, ui; memset(&ins, 0, sizeof ins); memset(&ui, 0, sizeof ui);
-        pb_u(&ins, 2, AAP_UI_MARGIN_BOTTOM); pb_u(&ins, 4, AAP_UI_MARGIN_RIGHT);
+        pb_u(&ins, 2, vfile ? mh : AAP_UI_MARGIN_BOTTOM); pb_u(&ins, 4, vfile ? mw : AAP_UI_MARGIN_RIGHT);
         pb_msg(&ui, 1, &ins); pb_msg(&cfg, 11, &ui);
     }
     pb_u(&sub, 1, 3 /* VIDEO */); pb_msg(&sub, 4, &cfg); pb_u(&sub, 5, 1);
@@ -359,7 +365,7 @@ static int send_sd_response(aa_t *a)
         a->lg("AA SERVICE_DISCOVERY_RESPONSE send failed");return -1;
     }
     a->lg("AA tx SERVICE_DISCOVERY_RESPONSE %u bytes (input/sensor/video + %s%sspeech/system + mic descriptor; capture unavailable)", (unsigned)sd.n, g_usb_media ? (g_aac ? "AAC-LC media(v56)/" : "PCM media/") : "", "PCM ");
-    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s, %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left", vfile ? "video.txt (centred)" : "built-in (top-left)");
+    a->lg("AA video margins %u x %u (UI %u x %u), dpi %u, driver %s, %s", mw, mh, 800 - mw, 480 - mh, dpi, rhd ? "right" : "left", vfile ? (g_video_topleft ? "video.txt (top-left)" : "video.txt (centred)") : "built-in (top-left)");
     a->lg("V17 BT1 media %s", g_usb_media ? "over USB ch4 -> DSP (default v54)" : "NOT announced (BT Audio mode): phone uses Bluetooth A2DP");
     return 0;
 }
