@@ -1356,6 +1356,53 @@ static int key_hook(int which, void* self, void* msg) {
 }
 static int key_hook_mfl(void* self, void* msg) { return key_hook(0, self, msg); }
 static int key_hook_panel(void* self, void* msg) { return key_hook(1, self, msg); }
+/* Steering-wheel voice button (CPxyControlElementsMFL::CPTTButton1) -> Google Assistant
+ * (AA keycode 84) while the AA picture is shown; otherwise BMW voice control as usual.
+ * Its message handler (vtable slot 6) is generated code: on a status message (op 12) it
+ * calls valid(this,0), decode(msg, this+124, 3), valid(this,1) and notifies two listener
+ * lists. For AA we do the same but skip the notification, so BMW voice control does not
+ * start. The helper addresses are read from the handler's own calls (checked by code
+ * signature), so no per-build address is needed. Each press reaches three proxy instances:
+ * only the first change of the value sends the key. Car test: C16A. */
+typedef void (*PttValid)(void*, int);
+typedef int (*PttDecode)(void*, void*, int);
+static unsigned long* g_ptt_slot = 0;
+static unsigned long g_ptt_orig = 0, g_ptt_valid = 0, g_ptt_dec = 0;
+static unsigned long fnv1a(const unsigned char* p, unsigned n) {
+    unsigned long h = 0x811c9dc5UL; while (n--) h = (h ^ *p++) * 0x01000193UL; return h;
+}
+static unsigned long call_target(unsigned long fn, unsigned bsrf_off, unsigned lit_off) {
+    return fn + bsrf_off + 4 + *(const unsigned long*)(fn + lit_off);   /* mov.l @(lit),r1; bsrf r1 */
+}
+static int ptt_hook(void* self, void* msg) {
+    if (((unsigned char*)msg)[8] != 12 || !g_live_disp || !g_aa_input || !g_aa_busy || !g_aa_busy())
+        return ((MsgHandler)g_ptt_orig)(self, msg);
+    ((PttValid)g_ptt_valid)(self, 0);
+    if (!((PttDecode)g_ptt_dec)(msg, (char*)self + 124, 3)) return 0;
+    ((PttValid)g_ptt_valid)(self, 1);
+    int v = *(int*)((char*)self + 124), prev = g_ptt_state;
+    g_ptt_state = v;
+    if (v == 1 && prev != 1) {                         /* 1 = pressed, 0 = released */
+        g_aa_input(CICAA_IN_KEY, 84, 1); g_aa_input(CICAA_IN_KEY, 84, 0);
+        alog("PTT -> Google Assistant");
+    }
+    return 1;
+}
+static void ptt_install(void* self) {
+    unsigned long* vt = self ? (unsigned long*)dlsym(self, "_ZTVN22CPxyControlElementsMFL11CPTTButton1E") : 0;
+    unsigned long* slot = vt ? vt + 8 : 0;
+    unsigned long fn = slot ? *slot : 0;
+    int ok = fn >= 0x08040000UL && fn < 0x09200000UL && fnv1a((const unsigned char*)fn, 0x9c) == 0xe48a3b07UL;
+    unsigned long valid = 0, dec = 0, notify = 0;
+    if (ok) {
+        valid = call_target(fn, 0x3e, 0xa0); dec = call_target(fn, 0x4a, 0xa4); notify = call_target(fn, 0x62, 0xac);
+        ok = valid == call_target(fn, 0x58, 0xa8) && notify == call_target(fn, 0x6c, 0xb0) &&
+             fnv1a((const unsigned char*)valid, 16) == 0xe29bb935UL && fnv1a((const unsigned char*)notify, 16) == 0x0d76613cUL &&
+             fnv1a((const unsigned char*)dec, 16) == 0xd73400f9UL;
+    }
+    if (ok) { g_ptt_orig = fn; g_ptt_valid = valid; g_ptt_dec = dec; g_ptt_slot = slot; *slot = (unsigned long)&ptt_hook; }
+    alog_val("keys voice button hook", ok);
+}
 static void keys_install() {
     if (g_keys_tried) return;
     g_keys_tried = 1;
@@ -1371,9 +1418,11 @@ static void keys_install() {
         if (ok) { h.slot = slot; *slot = (unsigned long)h.hook; }   /* one aligned store */
         alog_val(k ? "keys panel hook" : "keys mfl hook", ok ? 1 : slot ? (int)*slot : 0);
     }
+    ptt_install(self);
 }
 static void keys_restore() {
     for (int k = 0; k < 2; ++k) if (g_kh[k].slot) { *g_kh[k].slot = g_kh[k].orig; g_kh[k].slot = 0; }
+    if (g_ptt_slot) { *g_ptt_slot = g_ptt_orig; g_ptt_slot = 0; }
 }
 
 extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
