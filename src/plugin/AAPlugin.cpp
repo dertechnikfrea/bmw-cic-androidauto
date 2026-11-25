@@ -197,6 +197,10 @@ typedef void (*fn_void)(void);
 static fn_int g_aa_start = 0, g_aa_busy = 0, g_aa_proj = 0;
 static fn_str g_aa_status = 0, g_aa_result = 0;
 static fn_input g_aa_input = 0;
+typedef void (*fn_vint)(int);
+static fn_vint g_aa_mic_hold = 0;          /* libcicaa: hold the car microphone while AA is shown */
+static fn_int g_aa_speech_want = 0;        /* libcicaa: 1 = audio connection 0x31 needed */
+static volatile int g_user_off = 0;        /* Disconnect pressed: no autoconnect until Connect */
 static fn_void g_aa_project = 0;
 static volatile int g_aa_polling = 0;
 static volatile int g_live_disp = 0;      /* AA video on screen */
@@ -839,6 +843,84 @@ static int iba_queue() {
     return id != -1;
 }
 
+/* ---------------- microphone route + autoconnect (second HMI-thread job) ----------------
+ * A small thread (started in aap_create) watches three things every 100 ms:
+ *  - AA picture on/off -> cicaa_mic_hold(): libcicaa keeps the car microphone (io-audio
+ *    FACBMIC) open while AA is shown, because BMW's speech service grabs it as soon as
+ *    connection 0x31 comes up and the first opener wins.
+ *  - cicaa_speech_want(): libcicaa needs audio connection 0x31 (car microphone + speech output)
+ *    while the phone listens or AA voice plays. 0x31 replaces C4 (music mutes, as with BMW
+ *    voice control); after the release C4 does not come back by itself, so it is requested
+ *    again (AA Audio mode only; in BT Audio mode the CIC's own source plays on).
+ *  - autoconnect: 10 s after the plugin start, then every 2 s while no AA session runs, the
+ *    Connect button is pressed for the user (not after Disconnect, not with noauto.on).
+ * The connection calls must run on the HMI thread: same executor as iba_queue(), own runnable. */
+static bool onConnect(void* obj, const bmw::Parcel&);
+static unsigned long g_aux_run[16], g_aux_run_vt[12], g_aux_parcel[16];
+static unsigned long g_aux_mtx[16];
+static int g_aux_mtx_ok = 0, g_aux_pending = 0, g_speech_have = 0;
+static volatile int g_aux_job_connect = 0;
+static unsigned short g_speech_h = 0;
+static void speech_apply() {
+    int want = g_live_disp && g_aa_speech_want && g_aa_speech_want();
+    if (want == g_speech_have || !g_iba_cm) return;
+    typedef int (*Connection)(void*, unsigned short, unsigned short);
+    if (want) {
+        g_speech_h = (unsigned short)iba_handle();
+        int rc = ((Connection)iba_a(0x08b9d308UL))(iba_off(g_iba_cm, 0x6c8), g_speech_h, 0x31);
+        g_speech_have = 1; alog_val("speech: request 0x31", rc);
+    } else {
+        int rc = ((Connection)iba_a(0x08b9d460UL))(iba_off(g_iba_cm, 0x760), g_speech_h, 0x31);
+        g_speech_have = 0; alog_val("speech: release 0x31", rc);
+        if (g_live_disp && g_iba_keep_audio && g_iba.handles[IBA_AUDIO]) {
+            rc = ((Connection)iba_a(0x08b9d308UL))(iba_off(g_iba_cm, 0x6c8), (unsigned short)g_iba.handles[IBA_AUDIO], 0xc4);
+            alog_val("speech: C4 again", rc);
+        }
+    }
+}
+static void aux_cb(void* epoch, int, void* runnable) {
+    if ((unsigned long)epoch == g_iba_epoch && !auto_is_shutdown() && pthread_self() == g_hmi_tid &&
+        runnable == (void*)g_aux_run && ((IbaCurrentPU)iba_a(0x08d5c528UL))() == g_iba_pu) {
+        if (g_aux_job_connect) {
+            g_aux_job_connect = 0;
+            if (g_app && !g_aa_polling && !g_user_off) { alog("autoconnect"); onConnect(g_app, *reinterpret_cast<const bmw::Parcel*>(g_aux_parcel)); }
+        }
+        speech_apply();
+    }
+    pthread_mutex_lock(g_aux_mtx); g_aux_pending = 0; pthread_mutex_unlock(g_aux_mtx);
+}
+static int aux_queue() {
+    if (!g_iba_marshal_ok || !g_aux_mtx_ok) return 0;
+    pthread_mutex_lock(g_aux_mtx);
+    if (g_aux_pending) { pthread_mutex_unlock(g_aux_mtx); return 0; }
+    for (unsigned i = 0; i < 16; ++i) g_aux_run[i] = 0;
+    for (unsigned i = 0; i < 12; ++i) g_aux_run_vt[i] = (unsigned long)&iba_run_noop;
+    g_aux_run[0] = (unsigned long)g_aux_run_vt;
+    g_aux_pending = 1;
+    typedef int (*Add)(void*, void*, void*, int, void*);
+    int id = ((Add)iba_a(0x08d5f9a4UL))(iba_off(g_iba_pu, 0x3c8), (void*)g_iba_epoch, (void*)&aux_cb, 0, (void*)g_aux_run);
+    if (id == -1) g_aux_pending = 0;
+    pthread_mutex_unlock(g_aux_mtx);
+    return id != -1;
+}
+static volatile int g_ptt_state = 0;
+static void* aux_thread(void*) {
+    struct timespec t = {0, 100000000};
+    long start = mono_ms(), last_try = 0; int disp = 0;
+    while (g_app) {
+        nanosleep(&t, 0);
+        int d = g_live_disp;
+        if (d != disp) { disp = d; g_ptt_state = 0; if (g_aa_mic_hold) g_aa_mic_hold(d); }
+        int want = d && g_aa_speech_want && g_aa_speech_want();
+        if (want != g_speech_have) aux_queue();
+        long now = mono_ms();
+        if (now - start >= 10000 && now - last_try >= 2000 && !g_aa_polling && !g_user_off && !file_exists(AAP_NOAUTO_ON)) {
+            last_try = now; g_aux_job_connect = 1; aux_queue();
+        }
+    }
+    return 0;
+}
+
 /* ---------------- automatic flow (start -> playing -> stop) ---------------- */
 #include "auto_player.h"
 static unsigned long g_auto_mtx[16];
@@ -1050,6 +1132,7 @@ static void location_activate(bmw::PluginApp* app);
 static void keys_install();
 static bool onConnect(void* obj, const bmw::Parcel&) {
     bmw::PluginApp* app = static_cast<bmw::PluginApp*>(obj);
+    g_user_off = 0;
     status_line(app);
     location_activate(app);
     keys_install();
@@ -1077,6 +1160,8 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
         g_aa_input = (fn_input)dlsym(h, "cicaa_input");
         g_aa_proj = (fn_int)dlsym(h, "cicaa_projection");
         g_aa_project = (fn_void)dlsym(h, "cicaa_project");
+        g_aa_mic_hold = (fn_vint)dlsym(h, "cicaa_mic_hold");          /* optional: microphone */
+        g_aa_speech_want = (fn_int)dlsym(h, "cicaa_speech_want");
         if (!(g_aa_start && g_aa_busy && g_aa_status && g_aa_result)) { g_aa_start = 0; ui(app, MODEL_STATUS, "libcicaa.so incompatible"); return true; }
     }
     if (g_logs) mkdir(AAP_LOGDIR, 0755);
@@ -1118,6 +1203,9 @@ static bool onDisconnect(void*, const bmw::Parcel&) {
     if (g_aa_busy && g_aa_busy() && g_aa_input) { g_aa_input(CICAA_IN_BYEBYE, 0, 0); alog("Disconnect pressed"); }
     return true;
 }
+/* The Disconnect button (not Switch Audio, which also ends the session): no autoconnect
+ * until Connect is pressed again. */
+static bool onDisconnectButton(void* obj, const bmw::Parcel& p) { g_user_off = 1; return onDisconnect(obj, p); }
 /* Switch Audio: BT Audio <-> AA Audio (aaaudio.on). The media channel is only announced
  * at service discovery, so a running session is ended (like Disconnect); the next
  * Connect uses the new mode. */
@@ -1295,7 +1383,7 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     if (!app) return 0;
     g_logs = file_exists(AAP_LOGS_ON);
     add(app, ACTION_CONNECT, &onConnect);
-    add(app, ACTION_DISCONNECT, &onDisconnect);
+    add(app, ACTION_DISCONNECT, &onDisconnectButton);
     add(app, ACTION_ZOOM, &onZoom);
     add(app, ACTION_AUDIO, &onSwitchAudio);
     add(app, ACTION_LOGS, &onLogs);
@@ -1310,6 +1398,9 @@ extern "C" void* aap_create(bmw::IDispatcher& dispatcher, const char* name,
     g_app = app;
     auto_runtime_init();
     iba_capture_pu();     /* HMI ProcUnit of the loading thread, for native calls */
+    if (screen_mode() == 4) full_files(1);   /* the installer removes video.txt/geom.txt not on the stick */
+    if (!g_aux_mtx_ok) g_aux_mtx_ok = pthread_mutex_init(g_aux_mtx, 0) == 0;
+    { int t; if (pthread_create(&t, 0, &aux_thread, 0) == 0) pthread_detach(t); }   /* microphone route, autoconnect */
     /* No updateModel here: the adapter is not started yet (XML text= is the prefix). */
     return app;
 }
