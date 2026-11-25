@@ -189,9 +189,11 @@ static int read_msg(aa_t *a, int timeout_ms)
         }
         if (waited >= timeout_ms) return 0;
         {
-            int r = a->t->recv(a->t->ctx, a->rx + a->rxn, (int)(sizeof a->rx - a->rxn), 100);
+            /* in slices of at most 100 ms, and never longer than the caller asked for */
+            int slice = timeout_ms - waited < 100 ? timeout_ms - waited : 100;
+            int r = a->t->recv(a->t->ctx, a->rx + a->rxn, (int)(sizeof a->rx - a->rxn), slice);
             if (r < 0) { a->lg("AA transport recv error %d", r); return -1; }
-            if (r == 0) waited += 100; else a->rxn += (size_t)r;
+            if (r == 0) waited += slice; else a->rxn += (size_t)r;
         }
     }
 }
@@ -717,13 +719,15 @@ int aa_session(aa_transport_t *t, const aa_pki_t *pki, aa_log_fn lg, aa_status_f
     else if (a->cfd >= 0) { close(a->cfd); a->cfd = -1; }
     st("AA: session active");
 
-    /* 4.. main loop: up to 10 min or 60 s of silence */
+    /* 4.. main loop: up to 10 min or 60 s of silence. read_msg() waits at most 20 ms, so
+       iDrive input queued while the phone sends nothing (static screen) leaves after
+       <= 20 ms instead of <= 100 ms; 3000 empty passes are still 60 s. */
     g_proj = 1; g_proj_req = 0;
-    for (i = 0; idle < 600; ++i) {
+    for (i = 0; idle < 3000; ++i) {
         int r;
         if (av_failed()) { snprintf(summary,sn,"V13 video backend failure (see log)"); break; }
         input_drain(a);
-        r = read_msg(a, 100);
+        r = read_msg(a, 20);
         if (r == 0) { ++idle; continue; }
         if (r < 0) { lg("AA session read rc=%d", r); break; }
         idle = 0;
