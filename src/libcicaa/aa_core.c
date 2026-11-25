@@ -229,6 +229,11 @@ int cicaa_input(int kind, int code, int value)
 }
 int cicaa_projection(void) { return g_proj; }
 void cicaa_project(void) { g_proj_req = 1; }
+/* Microphone / AA voice (aa_mic.h). The plugin calls cicaa_mic_hold(1) when the AA picture
+ * is shown and (0) when it is gone, and polls cicaa_speech_want(): 1 = audio connection 0x31
+ * (car microphone + speech output) is needed now; it requests/releases 0x31 on the HMI thread. */
+void cicaa_mic_hold(int on) { mic_hold(on); }
+int cicaa_speech_want(void) { return g_speech_want; }
 static void pb_s32(pb_t *p, int f, int v)          /* int32 varint, negative = 10 bytes */
 {
     unsigned long lo = (unsigned long)v; int i;
@@ -416,6 +421,7 @@ static int on_video(aa_t *a, int id, const unsigned char *p, size_t n)
  *  6 RelativeEvent{1 Rel{1 keycode, 2 delta}}}. Also projection re-request. */
 static void input_drain(aa_t *a)
 {
+    mic_poll(a);                     /* car microphone -> channel 7 while the phone listens */
     for (;;) {
         int kind, code, val; pb_t ev, outer, item; unsigned long long ts;
         pthread_mutex_lock(&g_inmu);
