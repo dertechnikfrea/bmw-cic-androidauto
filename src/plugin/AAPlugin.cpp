@@ -464,22 +464,68 @@ static int iba_snapshot_rect() {
 static int g_dsp_pid = 0;
 static int g_dsp_attempted = 0;
 /* Screen mode (Zoom Mode button), stored as files so it survives a CIC restart:
- *   none     -> 0 Normal:     picture centred (x 256..1216), CIC menu/arcs stay visible
- *   zoom.on  -> 1 Fullscreen: same size from x = 0, CIC menu layer hidden, rest black
- *   wide.on  -> 2 Stretched:  stretched to the full 1280 px width, CIC menu hidden
- * Built-in geometry (geom.txt is gone: the layout must match what libcicaa asks the
- * phone for, so a free text file only caused broken pictures). */
+ *   none      -> 0 Normal:      720x360 area shown 960x480, centred (x 160), black sides
+ *   zoom.on   -> 1 Left:        same size at the left edge
+ *   right.on  -> 2 Right:       same size at the right edge
+ *   wide.on   -> 3 Stretched:   stretched to the full 1280 px width (distorted)
+ *   full.on   -> 4 Full screen: the phone draws an 8:3 area (video.txt "80 210 116 topleft"
+ *                -> 720x270 in the top-left corner) that is scaled to 1280x480 without
+ *                distortion (geom.txt). 720 px is the widest the DSP shows of the 800x480
+ *                stream, so this is the sharpest full-screen picture. The phone takes a new
+ *                area only at connection time: switching into or out of it ends the session
+ *                (like Switch Audio) and autoconnect starts the next one.
+ * The CIC menu layer is hidden in every mode. */
 static int screen_mode() {
-    if (file_exists(AAP_WIDE_ON)) return 2;
+    if (file_exists(AAP_FULL_ON)) return 4;
+    if (file_exists(AAP_WIDE_ON)) return 3;
+    if (file_exists(AAP_RIGHT_ON)) return 2;
     return file_exists(AAP_ZOOM_ON) ? 1 : 0;
 }
+static void put_file(const char* path, const char* text) {
+    int f = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (f >= 0) { unsigned n = 0; while (text[n]) ++n; write(f, text, n); close(f); }
+}
+static unsigned num_put(char* b, unsigned n, unsigned v) {
+    char t[12]; int k = 0; do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (k) b[n++] = t[--k];
+    return n;
+}
+/* Full screen on: video.txt + geom.txt from fullscreen.txt ("margin_w margin_h dpi") or the
+ * built-in 80 210 116; off: both removed (built-in geometry, built-in margins). */
+static void full_files(int on) {
+    if (!on) { unlink(AAP_VIDEO_TXT); unlink(AAP_GEOM_TXT); return; }
+    unsigned v[3] = {AAP_FULL_MARGINS}, t[3] = {0, 0, 0}; int k = 0;
+    int f = open(AAP_FULL_TXT, 0);
+    if (f >= 0) {
+        char b[64]; int n = read(f, b, sizeof b - 1); close(f);
+        for (int i = 0; i < n && k < 3; ++i) {
+            if (b[i] < '0' || b[i] > '9') continue;
+            while (i < n && b[i] >= '0' && b[i] <= '9') t[k] = t[k] * 10 + (unsigned)(b[i++] - '0');
+            ++k;
+        }
+        if (k >= 2 && t[0] <= 600 && t[1] <= 320) { v[0] = t[0]; v[1] = t[1]; }
+        if (k >= 3 && t[2] >= 60 && t[2] <= 400) v[2] = t[2];
+    }
+    char b[64]; unsigned n = 0;
+    n = num_put(b, n, v[0]); b[n++] = ' '; n = num_put(b, n, v[1]); b[n++] = ' '; n = num_put(b, n, v[2]);
+    n = put_str(b, n, " topleft\n"); b[n] = 0;
+    put_file(AAP_VIDEO_TXT, b);
+    n = put_str(b, 0, "0 0 "); n = num_put(b, n, 800 - v[0]); b[n++] = ' '; n = num_put(b, n, 480 - v[1]);
+    n = put_str(b, n, " 0 0 1280 480\n"); b[n] = 0;
+    put_file(AAP_GEOM_TXT, b);
+}
 static void screen_mode_next() {
-    int m = (screen_mode() + 1) % 3;
-    unlink(AAP_ZOOM_ON); unlink(AAP_WIDE_ON);
-    if (m) { int f = open(m == 1 ? AAP_ZOOM_ON : AAP_WIDE_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+    static const char* const kFile[5] = {0, AAP_ZOOM_ON, AAP_RIGHT_ON, AAP_WIDE_ON, AAP_FULL_ON};
+    int old = screen_mode(), m = (old + 1) % 5;
+    unlink(AAP_ZOOM_ON); unlink(AAP_RIGHT_ON); unlink(AAP_WIDE_ON); unlink(AAP_FULL_ON);
+    if (m) { int f = open(kFile[m], O_WRONLY | O_CREAT | O_TRUNC, 0644); if (f >= 0) close(f); }
+    if ((old == 4) != (m == 4)) {
+        full_files(m == 4);
+        if (g_aa_busy && g_aa_busy() && g_aa_input) { g_aa_input(CICAA_IN_BYEBYE, 0, 0); alog("Full screen changed: new session"); }
+    }
 }
 static void geom_load(short* g) {
-    static const short def[3][8] = {AAP_GEOM_NORMAL, AAP_GEOM_FULLSCREEN, AAP_GEOM_STRETCHED};
+    static const short def[5][8] = {AAP_GEOM_NORMAL, AAP_GEOM_LEFT, AAP_GEOM_RIGHT, AAP_GEOM_STRETCHED, AAP_GEOM_FULL};
     int m = screen_mode();
     for (int i = 0; i < 8; ++i) g[i] = def[m][i];
     /* geom.txt (optional, e.g. with video.txt on an E60) replaces the built-in geometry */
@@ -708,7 +754,7 @@ static void iba_do(bmw::PluginApp* app, int stopping) {
         ((SetAlpha)vt[14])(g_iba_mgr, 26, 0);
         typedef void (*Enable)(int); ((Enable)iba_a(kLayerHelper))(1); g_iba_layer = 1;
         g_iba.ack(op, 0, 1);
-        if (screen_mode() != 0) menu_hide_for_video();   /* Normal keeps the CIC menu visible */
+        menu_hide_for_video();                           /* every mode: black around the picture */
         return;
     }
     if (g_iba.stopping && !live_reap()) return;
@@ -1041,17 +1087,26 @@ static bool onConnect(void* obj, const bmw::Parcel&) {
     ui(app, MODEL_STATUS, "Connect the phone via USB...");
     return true;
 }
-/* The one status line of the page: "Screen: Normal | BT Audio" (" | Logs ON" instead of
- * the audio mode while logging). Refreshed when the page opens (also via a programmed
+/* The one status line of the page: "Screen: Normal | BT Audio" (+ " | Logs ON" while
+ * logging; German with lang.txt "de": "Bild: Normal | Ton: BT | Protokoll an"). Refreshed when the page opens (also via a programmed
  * favourite button), on Connect and after every button press. It also re-reads the
  * audio mode for the next display start. */
+static int lang_de() {
+    char b[8]; int f = open(AAP_LANG_TXT, 0);
+    if (f < 0) return 0;
+    int n = read(f, b, sizeof b); close(f);
+    return n >= 2 && (b[0] == 'd' || b[0] == 'D') && (b[1] == 'e' || b[1] == 'E');
+}
 static void status_line(bmw::PluginApp* app) {
-    static const char* const kMode[3] = {"Normal", "Fullscreen", "Stretched"};
+    static const char* const kMode[5] = {"Normal", "Left", "Right", "Stretched", "Full screen"};
+    static const char* const kModeDe[5] = {"Normal", "Links", "Rechts", "Gestreckt", "Vollbild"};
     g_iba_keep_audio = file_exists(AAP_AAUDIO_ON);
-    char b[96]; unsigned n = put_str(b, 0, "Screen: ");
-    n = put_str(b, n, kMode[screen_mode()]);
-    if (g_logs) n = put_str(b, n, " | Logs ON");
+    int de = lang_de(), m = screen_mode();
+    char b[96]; unsigned n = put_str(b, 0, de ? "Bild: " : "Screen: ");
+    n = put_str(b, n, de ? kModeDe[m] : kMode[m]);
+    if (de) n = put_str(b, n, g_iba_keep_audio ? " | Ton: USB" : " | Ton: BT");
     else n = put_str(b, n, g_iba_keep_audio ? " | AA Audio" : " | BT Audio");
+    if (g_logs) n = put_str(b, n, de ? " | Protokoll an" : " | Logs ON");
     b[n] = 0;
     ui(app, MODEL_SCREEN, b);
 }
@@ -1082,6 +1137,7 @@ static bool onLogs(void* obj, const bmw::Parcel&) {
     if (g_logs) { unlink(AAP_LOGS_ON); g_logs = 0; }
     else {
         mkdir(AAP_LOGDIR, 0755);
+        unlink(AAP_LOGDIR "/plugin.log"); unlink(AAP_LOGDIR "/cicaa.log"); unlink(AAP_LOGDIR "/cicaalive.log");   /* fresh logs */
         int f = open(AAP_LOGS_ON, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (f >= 0) { close(f); g_logs = 1; alog("=== logs ON, AAPlugin " AAP_VERSION " ==="); }
     }
